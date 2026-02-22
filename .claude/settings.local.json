@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(pip install:*)",
+      "Bash(npx vite build)",
+      "Bash(python -c:*)",
+      "Bash(python:*)",
+      "Bash(PYTHONIOENCODING=utf-8 python3:*)",
+      "Bash(python3:*)",
+      "Bash(pip show:*)",
+      "Bash(pip --version:*)",
+      "Bash(PYTHONIOENCODING=utf-8 /c/Python313/python.exe:*)",
+      "Bash(/c/Python313/python.exe:*)",
+      "Bash(npm run build:*)"
+    ]
+  }
+}

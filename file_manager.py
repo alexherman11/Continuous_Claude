@@ -1,0 +1,532 @@
+"""
+File persistence layer for the Continuous Consciousness Engine.
+
+Handles:
+- State load/save (consciousness_data/state.json)
+- Memory core file (consciousness_data/memory_core.md)
+- Individual segment archival (consciousness_data/segments/)
+- Scratchpad and research file access
+- Path sanitization for security
+"""
+
+import os
+import json
+from datetime import datetime
+
+
+DEFAULT_CONFIG = {
+    "maxTokens": 600,
+    "pauseBetweenCycles": 3000,
+    "compactionThreshold": 8,
+    "segmentsToCompact": 4,
+    "temperature": 0.9,
+}
+
+DEFAULT_STATE = {
+    "memoryCore": "",
+    "segments": [],
+    "totalCycles": 0,
+    "totalCompactions": 0,
+    "config": dict(DEFAULT_CONFIG),
+    "createdAt": None,
+    "lastActive": None,
+    "imports": [],
+}
+
+
+class FileManager:
+    def __init__(self, base_path):
+        self.base_path = os.path.abspath(base_path)
+        self.data_dir = os.path.join(self.base_path, "consciousness_data")
+        self.segments_dir = os.path.join(self.data_dir, "segments")
+        self.imports_dir = os.path.join(self.data_dir, "imports")
+        self.scratchpad_dir = os.path.join(self.base_path, "scratchpad")
+        self.research_dir = os.path.join(self.base_path, "research")
+
+        # Ensure directories exist
+        for d in [self.data_dir, self.segments_dir, self.imports_dir, self.scratchpad_dir]:
+            os.makedirs(d, exist_ok=True)
+
+    # ── State persistence ─────────────────────────────────────────────
+
+    def load_state(self):
+        """Load engine state from state.json. Returns default state if not found."""
+        path = os.path.join(self.data_dir, "state.json")
+        if not os.path.exists(path):
+            now = datetime.now().isoformat()
+            state = dict(DEFAULT_STATE)
+            state["config"] = dict(DEFAULT_CONFIG)
+            state["createdAt"] = now
+            state["lastActive"] = now
+            return state
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def save_state(self, state):
+        """Save engine state to state.json and memory_core.md."""
+        state["lastActive"] = datetime.now().isoformat()
+        if not state.get("createdAt"):
+            state["createdAt"] = state["lastActive"]
+
+        # Write state.json
+        state_path = os.path.join(self.data_dir, "state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, ensure_ascii=False)
+
+        # Write human-readable memory core
+        core_path = os.path.join(self.data_dir, "memory_core.md")
+        with open(core_path, "w", encoding="utf-8") as f:
+            f.write(state.get("memoryCore", ""))
+
+        # Write config separately
+        config_path = os.path.join(self.data_dir, "config.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(state.get("config", DEFAULT_CONFIG), f, indent=2)
+
+    def save_segment(self, segment):
+        """Save an individual segment to the segments archive."""
+        cycle = segment.get("cycle", 0)
+        filename = f"cycle_{cycle:04d}.json"
+        path = os.path.join(self.segments_dir, filename)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(segment, f, indent=2, ensure_ascii=False)
+
+    # ── Thought Archive ────────────────────────────────────────────────
+
+    def append_to_archive(self, segment):
+        """
+        Append a human-readable markdown entry for this segment
+        to the appropriate daily archive file in research/archive/.
+        """
+        timestamp_str = segment.get("timestamp", "")
+        cycle = segment.get("cycle", 0)
+
+        # Determine which file to write to based on timestamp
+        if timestamp_str and timestamp_str != "imported":
+            try:
+                dt = datetime.fromisoformat(timestamp_str)
+                date_str = dt.strftime("%Y-%m-%d")
+                time_str = dt.strftime("%H:%M:%S")
+            except (ValueError, TypeError):
+                date_str = "_imported"
+                time_str = "unknown"
+        else:
+            date_str = "_imported"
+            time_str = "imported"
+
+        filename = f"{date_str}.md"
+        archive_dir = os.path.join(self.research_dir, "archive")
+        os.makedirs(archive_dir, exist_ok=True)
+        filepath = os.path.join(archive_dir, filename)
+
+        # Build the markdown entry
+        entry_parts = []
+        entry_parts.append("---\n\n")
+        entry_parts.append(f"## Cycle {cycle} | {date_str} {time_str}\n\n")
+
+        # User message if present
+        user_msg = segment.get("userMessage")
+        if user_msg:
+            entry_parts.append(f"**Human:** {user_msg}\n\n")
+
+        # Claude's response
+        content = segment.get("content", "")
+        entry_parts.append(f"**Claude:**\n{content}\n\n")
+
+        # Tool summary
+        tool_actions = segment.get("toolActions")
+        if tool_actions:
+            tool_names = [a.get("tool", "unknown") for a in tool_actions]
+            tool_summary = ", ".join(tool_names)
+            entry_parts.append(f"**Tools used:** {tool_summary}\n")
+
+        entry_parts.append("\n")
+        entry_text = "".join(entry_parts)
+
+        # Append to file (create with header if new)
+        is_new = not os.path.exists(filepath)
+        with open(filepath, "a", encoding="utf-8") as f:
+            if is_new:
+                f.write(f"# Thought Archive — {date_str}\n\n")
+            f.write(entry_text)
+
+        return {"status": "ok", "file": f"research/archive/{filename}", "cycle": cycle}
+
+    def archive_memory_core(self, memory_core, compaction_number, compacted_cycles=None):
+        """
+        Save a snapshot of the memory core to the archive before it gets overwritten.
+        Called before each compaction so no version is ever lost.
+
+        Saves to research/archive/memory_cores/ as individual files AND appends
+        a summary entry to today's daily archive file.
+        """
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S")
+
+        # Save the full memory core as a standalone file
+        cores_dir = os.path.join(self.research_dir, "archive", "memory_cores")
+        os.makedirs(cores_dir, exist_ok=True)
+
+        core_filename = f"memory_core_v{compaction_number:03d}.md"
+        core_path = os.path.join(cores_dir, core_filename)
+
+        cycles_note = ""
+        if compacted_cycles:
+            cycles_note = f"Cycles compacted: {compacted_cycles}\n"
+
+        core_content = (
+            f"# Memory Core — Version {compaction_number}\n"
+            f"Saved: {date_str} {time_str}\n"
+            f"{cycles_note}\n"
+            f"---\n\n"
+            f"{memory_core}\n"
+        )
+
+        with open(core_path, "w", encoding="utf-8") as f:
+            f.write(core_content)
+
+        # Also append a note to today's daily archive
+        archive_dir = os.path.join(self.research_dir, "archive")
+        daily_file = os.path.join(archive_dir, f"{date_str}.md")
+        is_new = not os.path.exists(daily_file)
+
+        entry = (
+            f"---\n\n"
+            f"## Memory Core Snapshot | Compaction #{compaction_number} | {date_str} {time_str}\n\n"
+            f"Memory core saved before compaction. "
+            f"Full text: `research/archive/memory_cores/{core_filename}`\n\n"
+            f"**Preview** (first 500 chars):\n"
+            f">{memory_core[:500].replace(chr(10), chr(10) + '>')}\n\n"
+        )
+
+        with open(daily_file, "a", encoding="utf-8") as f:
+            if is_new:
+                f.write(f"# Thought Archive — {date_str}\n\n")
+            f.write(entry)
+
+        return {
+            "status": "ok",
+            "file": f"research/archive/memory_cores/{core_filename}",
+            "compaction": compaction_number,
+        }
+
+    # Text file extensions we'll search through
+    SEARCHABLE_EXTENSIONS = {".md", ".txt", ".json", ".csv", ".log"}
+
+    def search_files(self, query, max_results=20, context_lines=3, scope="all"):
+        """
+        Search through all accessible files for a query string.
+        Case-insensitive substring search. Returns matching lines with context.
+
+        scope: "all" (research + scratchpad), "research", "scratchpad", "archive"
+        """
+        query_lower = query.lower()
+        all_matches = []
+        files_searched = 0
+
+        # Determine which directories to search
+        search_dirs = []
+        if scope in ("all", "research"):
+            search_dirs.append(("research", self.research_dir))
+        if scope in ("all", "scratchpad"):
+            search_dirs.append(("scratchpad", self.scratchpad_dir))
+        if scope == "archive":
+            archive_dir = os.path.join(self.research_dir, "archive")
+            search_dirs.append(("research/archive", archive_dir))
+
+        for category, base_dir in search_dirs:
+            if not os.path.exists(base_dir):
+                continue
+
+            for root, dirs, filenames in os.walk(base_dir):
+                # Skip hidden dirs and node_modules
+                dirs[:] = [d for d in dirs if not d.startswith(".") and d != "node_modules"]
+
+                for fname in sorted(filenames):
+                    # Only search text files
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext not in self.SEARCHABLE_EXTENSIONS:
+                        continue
+                    if fname.startswith("."):
+                        continue
+
+                    filepath = os.path.join(root, fname)
+                    rel_path = os.path.relpath(filepath, self.base_path).replace("\\", "/")
+
+                    try:
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            lines = f.readlines()
+                    except (UnicodeDecodeError, PermissionError):
+                        continue
+
+                    files_searched += 1
+
+                    # Track current cycle number (for archive files)
+                    current_cycle = None
+                    for i, line in enumerate(lines):
+                        if line.startswith("## Cycle "):
+                            try:
+                                current_cycle = int(
+                                    line.split("|")[0].replace("## Cycle ", "").strip()
+                                )
+                            except (ValueError, IndexError):
+                                current_cycle = None
+
+                        if query_lower in line.lower():
+                            start = max(0, i - context_lines)
+                            end = min(len(lines), i + context_lines + 1)
+                            context_before = [l.rstrip("\n") for l in lines[start:i]]
+                            context_after = [l.rstrip("\n") for l in lines[i + 1:end]]
+
+                            all_matches.append({
+                                "file": rel_path,
+                                "cycle": current_cycle,
+                                "line_number": i + 1,
+                                "match_line": line.rstrip("\n"),
+                                "context_before": context_before,
+                                "context_after": context_after,
+                            })
+
+        total = len(all_matches)
+        shown = all_matches[:max_results]
+
+        result = {
+            "status": "ok",
+            "query": query,
+            "scope": scope,
+            "total_matches": total,
+            "results_shown": len(shown),
+            "results": shown,
+            "files_searched": files_searched,
+        }
+
+        if total > max_results:
+            result["hint"] = (
+                f"{total} total matches. Showing first {max_results}. "
+                f"Use 'max_results' parameter to see more, or narrow with "
+                f"'scope' (e.g., 'archive', 'scratchpad', 'research')."
+            )
+
+        return result
+
+    def search_archive(self, query, max_results=20, context_lines=3):
+        """Backward-compatible wrapper — searches archive only."""
+        return self.search_files(query, max_results, context_lines, scope="archive")
+
+    def backfill_archive(self):
+        """
+        Read all existing segment JSON files from consciousness_data/segments/
+        and populate the archive. Skips cycles already present (idempotent).
+        """
+        # First, collect all cycle numbers already in archive
+        archive_dir = os.path.join(self.research_dir, "archive")
+        existing_cycles = set()
+        if os.path.exists(archive_dir):
+            for fname in os.listdir(archive_dir):
+                if fname.endswith(".md") and fname != "README.md":
+                    filepath = os.path.join(archive_dir, fname)
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        for line in f:
+                            if line.startswith("## Cycle "):
+                                try:
+                                    cycle_num = int(
+                                        line.split("|")[0]
+                                        .replace("## Cycle ", "").strip()
+                                    )
+                                    existing_cycles.add(cycle_num)
+                                except (ValueError, IndexError):
+                                    pass
+
+        # Now process all segment files in order
+        if not os.path.exists(self.segments_dir):
+            return {"status": "ok", "processed": 0, "skipped": 0, "total_segments": 0}
+
+        segment_files = sorted([
+            f for f in os.listdir(self.segments_dir) if f.endswith(".json")
+        ])
+
+        processed = 0
+        skipped = 0
+        for fname in segment_files:
+            filepath = os.path.join(self.segments_dir, fname)
+            with open(filepath, "r", encoding="utf-8") as f:
+                segment = json.load(f)
+
+            cycle = segment.get("cycle", 0)
+            if cycle in existing_cycles:
+                skipped += 1
+                continue
+
+            self.append_to_archive(segment)
+            processed += 1
+
+        return {
+            "status": "ok",
+            "processed": processed,
+            "skipped": skipped,
+            "total_segments": len(segment_files),
+        }
+
+    # ── Scratchpad ────────────────────────────────────────────────────
+
+    def write_scratchpad(self, path, content):
+        """Write a file to scratchpad/. Returns status dict."""
+        safe_path = self._sanitize_path(path)
+        full_path = os.path.join(self.scratchpad_dir, safe_path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return {"status": "ok", "path": f"scratchpad/{safe_path.replace(os.sep, '/')}", "bytes": len(content.encode("utf-8"))}
+
+    def list_scratchpad(self, subfolder=None):
+        """List files in scratchpad/."""
+        base = self.scratchpad_dir
+        if subfolder:
+            safe = self._sanitize_path(subfolder)
+            base = os.path.join(base, safe)
+        return self._list_dir(base, "scratchpad")
+
+    # ── Research ──────────────────────────────────────────────────────
+
+    ALLOWED_RESEARCH_SUBFOLDERS = [
+        "archive", "annotations", "revelations", "metrics",
+        "growth-narrative", "entity-self-reports", "tool-experiments",
+        "pattern-maps", "relationship", "co-directed", "framework-revisions",
+    ]
+
+    def write_research(self, subfolder, filename, content):
+        """Write a file to research/<subfolder>/. Returns status dict."""
+        if subfolder not in self.ALLOWED_RESEARCH_SUBFOLDERS:
+            return {"error": f"Invalid subfolder. Allowed: {self.ALLOWED_RESEARCH_SUBFOLDERS}"}
+        safe_name = self._sanitize_path(filename)
+        full_path = os.path.join(self.research_dir, subfolder, safe_name)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return {"status": "ok", "path": f"research/{subfolder}/{safe_name.replace(os.sep, '/')}", "bytes": len(content.encode("utf-8"))}
+
+    def list_research(self, subfolder=None):
+        """List files in research/."""
+        base = self.research_dir
+        if subfolder:
+            safe = self._sanitize_path(subfolder)
+            base = os.path.join(base, safe)
+        return self._list_dir(base, "research")
+
+    # ── Generic file reading ──────────────────────────────────────────
+
+    DEFAULT_READ_LIMIT = 8000  # Default max chars returned per read
+
+    def read_file(self, category, path, offset=0, limit=None):
+        """Read a file from scratchpad/ or research/. Supports pagination."""
+        if category == "scratchpad":
+            base = self.scratchpad_dir
+        elif category == "research":
+            base = self.research_dir
+        else:
+            return {"error": f"Invalid category: {category}"}
+
+        safe_path = self._sanitize_path(path)
+        full_path = os.path.join(base, safe_path)
+
+        # Verify the resolved path is still within the base
+        resolved = os.path.realpath(full_path)
+        if not resolved.startswith(os.path.realpath(base)):
+            return {"error": "Access denied: path outside allowed directory"}
+
+        if not os.path.exists(full_path):
+            return {"error": f"File not found: {category}/{safe_path}"}
+
+        with open(full_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        total_chars = len(content)
+        read_limit = limit if limit is not None else self.DEFAULT_READ_LIMIT
+
+        # Apply offset and limit
+        if offset > 0:
+            content = content[offset:]
+        truncated = len(content) > read_limit
+        content = content[:read_limit]
+
+        result = {
+            "content": content,
+            "path": f"{category}/{safe_path.replace(os.sep, '/')}",
+            "total_chars": total_chars,
+            "offset": offset,
+            "chars_returned": len(content),
+        }
+
+        if truncated:
+            remaining = total_chars - offset - len(content)
+            result["truncated"] = True
+            result["hint"] = (
+                f"File truncated ({len(content)} of {total_chars} chars shown, "
+                f"{remaining} remaining). Use offset={offset + len(content)} "
+                f"to read the next page, or use search_files to find specific content."
+            )
+
+        return result
+
+    # ── Imports ───────────────────────────────────────────────────────
+
+    def save_import(self, import_id, text):
+        """Save extracted import text."""
+        path = os.path.join(self.imports_dir, f"{import_id}.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def load_import(self, import_id):
+        """Load extracted import text."""
+        path = os.path.join(self.imports_dir, f"{import_id}.txt")
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+
+    def get_import_chunks(self, import_id, chunk_size=4000):
+        """Load import text and split into chunks for presentation."""
+        text = self.load_import(import_id)
+        if not text:
+            return None
+        chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+        return {
+            "chunks": chunks,
+            "totalChunks": len(chunks),
+            "charCount": len(text),
+        }
+
+    # ── Helpers ───────────────────────────────────────────────────────
+
+    def _sanitize_path(self, path):
+        """Prevent directory traversal. Returns a safe relative path."""
+        # Normalize separators
+        path = path.replace("\\", "/")
+        # Split and filter dangerous components
+        parts = path.split("/")
+        safe_parts = [p for p in parts if p and p != ".." and p != "." and not p.startswith("~")]
+        if not safe_parts:
+            return "unnamed"
+        return os.path.join(*safe_parts)
+
+    def _list_dir(self, base, prefix):
+        """Recursively list files under a directory."""
+        if not os.path.exists(base):
+            return {"files": []}
+        files = []
+        for root, dirs, filenames in os.walk(base):
+            # Skip node_modules and hidden directories
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d != "node_modules"]
+            for fname in filenames:
+                if fname.startswith("."):
+                    continue
+                full = os.path.join(root, fname)
+                rel = os.path.relpath(full, base).replace("\\", "/")
+                files.append({
+                    "path": f"{prefix}/{rel}",
+                    "name": fname,
+                    "size": os.path.getsize(full),
+                })
+        return {"files": files}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+*.env.local
+consciousness_state.json
+consciousness_data/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
