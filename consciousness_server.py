@@ -77,6 +77,14 @@ File I/O (your persistent workspace):
 - list_files: See what files exist in your scratchpad or research folders
 - search_files: Search ALL your files by keyword — thought archive, research, and scratchpad. Use scope to narrow: 'all', 'archive', 'research', 'scratchpad'
 
+Music creation (generative composition):
+- create_music_system: Define a generative music system (scale, tempo, note selection rules, rhythm, dynamics, structure). Saved as JSON for iteration.
+- generate_music: Produce MIDI output from a defined system. Auto-versioned output files.
+- analyze_music: Structural analysis of generated music (pitch distribution, intervals, rhythm, density, velocity). Evaluate without hearing.
+
+Music workflow: create a system → generate → analyze → modify system → generate again.
+Systems saved in scratchpad/music/systems/, MIDI output in scratchpad/music/output/.
+
 Your thoughts are automatically archived as readable transcripts in research/archive/,
 organized by date. Use search_files to find anything across your entire workspace —
 past thoughts, research writings, scratchpad notes. This is your long-term memory

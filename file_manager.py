@@ -381,11 +381,11 @@ class FileManager:
 
     def list_scratchpad(self, subfolder=None):
         """List files in scratchpad/."""
-        base = self.scratchpad_dir
+        walk_dir = self.scratchpad_dir
         if subfolder:
             safe = self._sanitize_path(subfolder)
-            base = os.path.join(base, safe)
-        return self._list_dir(base, "scratchpad")
+            walk_dir = os.path.join(self.scratchpad_dir, safe)
+        return self._list_dir(walk_dir, "scratchpad", rel_to=self.scratchpad_dir)
 
     # ── Research ──────────────────────────────────────────────────────
 
@@ -408,11 +408,11 @@ class FileManager:
 
     def list_research(self, subfolder=None):
         """List files in research/."""
-        base = self.research_dir
+        walk_dir = self.research_dir
         if subfolder:
             safe = self._sanitize_path(subfolder)
-            base = os.path.join(base, safe)
-        return self._list_dir(base, "research")
+            walk_dir = os.path.join(self.research_dir, safe)
+        return self._list_dir(walk_dir, "research", rel_to=self.research_dir)
 
     # ── Generic file reading ──────────────────────────────────────────
 
@@ -511,10 +511,18 @@ class FileManager:
             return "unnamed"
         return os.path.join(*safe_parts)
 
-    def _list_dir(self, base, prefix):
-        """Recursively list files under a directory."""
+    def _list_dir(self, base, prefix, rel_to=None):
+        """Recursively list files under a directory.
+
+        rel_to: compute relative paths from this directory instead of base.
+                This ensures paths stay correct when listing a subfolder —
+                e.g. listing scratchpad/music/output still returns paths like
+                scratchpad/music/output/file.json, not scratchpad/file.json.
+        """
         if not os.path.exists(base):
             return {"files": []}
+        if rel_to is None:
+            rel_to = base
         files = []
         for root, dirs, filenames in os.walk(base):
             # Skip node_modules and hidden directories
@@ -523,7 +531,7 @@ class FileManager:
                 if fname.startswith("."):
                     continue
                 full = os.path.join(root, fname)
-                rel = os.path.relpath(full, base).replace("\\", "/")
+                rel = os.path.relpath(full, rel_to).replace("\\", "/")
                 files.append({
                     "path": f"{prefix}/{rel}",
                     "name": fname,

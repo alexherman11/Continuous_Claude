@@ -243,6 +243,137 @@ TOOL_SCHEMAS = [
             "required": ["category"],
         },
     },
+    # ── Music tools ─────────────────────────────────────────────────────
+    {
+        "name": "create_music_system",
+        "description": (
+            "Define a generative music system and save it as JSON. "
+            "The system specifies scale, tempo, note selection rules, rhythm, "
+            "dynamics, and structure. Once created, use generate_music to produce "
+            "MIDI output. Systems are saved to scratchpad/music/systems/ and can "
+            "be read back with read_file for iteration.\n\n"
+            "Note selection methods:\n"
+            "- weighted_random: weights for root/fifth/other scale degrees, plus rest_probability.\n"
+            "- markov_chain: pitch-class transition probabilities (keys are semitone offsets from root as strings).\n"
+            "- rule_based: a 'rules' LIST of rule objects. Each rule has 'type' plus type-specific fields.\n"
+            "  Rule types: {type:'max_leap', semitones:N}, {type:'direction_bias', bias:'upward'|'downward', strength:0-1},\n"
+            "  {type:'gravity', target_pc:N, strength:0-1}, {type:'avoid_repeat', max_consecutive:N}\n\n"
+            "Available scales: major, minor, harmonic_minor, melodic_minor, dorian, phrygian, "
+            "lydian, mixolydian, pentatonic_major, pentatonic_minor, blues, whole_tone, chromatic.\n\n"
+            "System JSON must include: global (tempo, root, scale, measures), "
+            "note_selection (method + config for that method), rhythm (durations, duration_weights). "
+            "Optional: global.octave_range, global.time_signature, dynamics, structure.\n\n"
+            "Optional dynamics: {base_velocity, velocity_range:[lo,hi], accent_beats:[1], accent_boost, "
+            "fade_in_measures, fade_out_measures}.\n"
+            "Optional structure: {phrases:[{label:'A', measures:[1,4], density:0.7}, ...]}."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "System name (used as filename). Use snake_case, no spaces.",
+                },
+                "system": {
+                    "type": "string",
+                    "description": (
+                        "The full system definition as a JSON string. Three examples by method:\n\n"
+                        "WEIGHTED RANDOM: "
+                        '{"global":{"tempo":90,"root":"C","scale":"pentatonic_minor","measures":8,"octave_range":[3,5]},'
+                        '"note_selection":{"method":"weighted_random","weighted_random":{"weights":{"root":3,"fifth":2,"other":1},"rest_probability":0.15}},'
+                        '"rhythm":{"durations":[0.5,1.0,1.5,2.0],"duration_weights":[0.2,0.4,0.25,0.15]}}\n\n'
+                        "MARKOV CHAIN (keys are pitch-class offsets from root as strings): "
+                        '{"global":{"tempo":72,"root":"D","scale":"minor","measures":8,"octave_range":[3,5]},'
+                        '"note_selection":{"method":"markov_chain","markov_chain":{"start_on":"root",'
+                        '"transitions":{"0":{"2":0.3,"3":0.4,"7":0.3},"2":{"0":0.3,"3":0.4,"5":0.3},'
+                        '"3":{"5":0.5,"0":0.3,"7":0.2},"5":{"7":0.4,"3":0.3,"0":0.3},'
+                        '"7":{"5":0.4,"8":0.3,"0":0.3},"8":{"7":0.5,"10":0.3,"5":0.2},'
+                        '"10":{"0":0.5,"8":0.3,"7":0.2}}}},'
+                        '"rhythm":{"durations":[1.0,2.0],"duration_weights":[0.6,0.4]}}\n\n'
+                        "RULE BASED (rules is a LIST of rule objects): "
+                        '{"global":{"tempo":100,"root":"A","scale":"blues","measures":8,"octave_range":[3,5]},'
+                        '"note_selection":{"method":"rule_based","rule_based":{"rules":['
+                        '{"type":"max_leap","semitones":5},'
+                        '{"type":"direction_bias","bias":"downward","strength":0.6},'
+                        '{"type":"gravity","target_pc":0,"strength":0.3},'
+                        '{"type":"avoid_repeat","max_consecutive":3}]}},'
+                        '"rhythm":{"durations":[0.5,1.0,1.5],"duration_weights":[0.3,0.5,0.2]}}'
+                    ),
+                },
+            },
+            "required": ["name", "system"],
+        },
+    },
+    {
+        "name": "generate_music",
+        "description": (
+            "Generate MIDI output from a previously defined music system. "
+            "Loads the named system from scratchpad/music/systems/, generates notes "
+            "according to its rules, and saves a MIDI file plus analysis data to "
+            "scratchpad/music/output/. Output files are auto-versioned "
+            "(system_name_v001.mid, _v002.mid, etc.). Returns a summary including "
+            "note count, duration, pitch range, and output path.\n\n"
+            "Use 'overrides' to temporarily change parameters for quick experimentation "
+            "without modifying the saved system."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "system_name": {
+                    "type": "string",
+                    "description": "Name of the system to generate from (must exist in scratchpad/music/systems/).",
+                },
+                "seed": {
+                    "type": "integer",
+                    "description": "Random seed for reproducible generation. Omit for random results.",
+                },
+                "overrides": {
+                    "type": "string",
+                    "description": (
+                        "Optional JSON string of parameter overrides applied temporarily for this "
+                        "generation only. Supports deep merge. "
+                        'Example: \'{"global":{"tempo":120}}\' or '
+                        '\'{"note_selection":{"method":"markov_chain"}}\'.'
+                    ),
+                },
+            },
+            "required": ["system_name"],
+        },
+    },
+    {
+        "name": "analyze_music",
+        "description": (
+            "Analyze a generated MIDI file's musical structure. Returns metrics you "
+            "can use to evaluate compositions without hearing them:\n"
+            "- pitch_classes: Distribution of pitch classes (which notes appear most)\n"
+            "- intervals: Melodic interval categories (stepwise vs leaps), direction\n"
+            "- rhythm: Duration distribution, rhythmic classifications\n"
+            "- density: Notes per beat, coverage, per-measure density, pitch range\n"
+            "- velocity: Dynamic range, average loudness\n\n"
+            "Use 'all' to get every metric, or pick specific ones."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": (
+                        "Path to the output to analyze, relative to scratchpad/. "
+                        "Example: 'music/output/ambient_drift_v001.mid'."
+                    ),
+                },
+                "metrics": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["pitch_classes", "intervals", "rhythm", "density", "velocity", "all"],
+                    },
+                    "description": "Which metrics to compute. Default: ['all'].",
+                },
+            },
+            "required": ["file_path"],
+        },
+    },
     # ── Search tool ────────────────────────────────────────────────────
     {
         "name": "search_files",
@@ -440,6 +571,35 @@ def execute_tool(name, tool_input, file_mgr, state):
         context_lines = tool_input.get("context_lines", 3)
         scope = tool_input.get("scope", "all")
         return file_mgr.search_files(query, max_results, context_lines, scope=scope)
+
+    # ── Music tools ────────────────────────────────────────────────
+
+    if name == "create_music_system":
+        from music_engine import create_system
+        sys_name = tool_input.get("name", "")
+        sys_json = tool_input.get("system", "")
+        if not sys_name:
+            return {"error": "name is required"}
+        if not sys_json:
+            return {"error": "system definition is required"}
+        return create_system(sys_name, sys_json, file_mgr)
+
+    if name == "generate_music":
+        from music_engine import generate
+        sys_name = tool_input.get("system_name", "")
+        if not sys_name:
+            return {"error": "system_name is required"}
+        seed = tool_input.get("seed")
+        overrides_json = tool_input.get("overrides")
+        return generate(sys_name, file_mgr, seed=seed, overrides_json=overrides_json)
+
+    if name == "analyze_music":
+        from music_engine import analyze
+        file_path = tool_input.get("file_path", "")
+        if not file_path:
+            return {"error": "file_path is required"}
+        metrics = tool_input.get("metrics", ["all"])
+        return analyze(file_path, metrics, file_mgr)
 
     # ── Unknown tool ──────────────────────────────────────────────
 

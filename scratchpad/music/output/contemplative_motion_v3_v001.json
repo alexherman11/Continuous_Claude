@@ -1,0 +1,123 @@
+{
+  "system_name": "contemplative_motion_v3",
+  "system_version": 1,
+  "output_version": 1,
+  "seed": 53,
+  "generated_at": "2026-02-22T02:40:13.124433",
+  "global": {
+    "tempo": 66,
+    "root": "F",
+    "scale": "minor",
+    "total_measures": 12,
+    "total_beats": 48
+  },
+  "notes": [
+    {
+      "pitch": 80,
+      "start": 6.0,
+      "duration": 2.0,
+      "velocity": 50
+    },
+    {
+      "pitch": 77,
+      "start": 9.0,
+      "duration": 1.0,
+      "velocity": 54
+    },
+    {
+      "pitch": 73,
+      "start": 14.0,
+      "duration": 1.0,
+      "velocity": 62
+    },
+    {
+      "pitch": 77,
+      "start": 15.0,
+      "duration": 1.0,
+      "velocity": 64
+    },
+    {
+      "pitch": 73,
+      "start": 16.0,
+      "duration": 1.5,
+      "velocity": 65
+    },
+    {
+      "pitch": 65,
+      "start": 17.5,
+      "duration": 2.0,
+      "velocity": 51
+    },
+    {
+      "pitch": 68,
+      "start": 21.5,
+      "duration": 1.5,
+      "velocity": 55
+    },
+    {
+      "pitch": 65,
+      "start": 23.0,
+      "duration": 1.0,
+      "velocity": 65
+    },
+    {
+      "pitch": 68,
+      "start": 24.0,
+      "duration": 1.0,
+      "velocity": 75
+    },
+    {
+      "pitch": 70,
+      "start": 26.0,
+      "duration": 1.0,
+      "velocity": 70
+    },
+    {
+      "pitch": 73,
+      "start": 30.5,
+      "duration": 2.0,
+      "velocity": 56
+    },
+    {
+      "pitch": 87,
+      "start": 32.5,
+      "duration": 1.5,
+      "velocity": 68
+    },
+    {
+      "pitch": 70,
+      "start": 35.5,
+      "duration": 2.0,
+      "velocity": 70
+    },
+    {
+      "pitch": 68,
+      "start": 37.5,
+      "duration": 1.5,
+      "velocity": 58
+    },
+    {
+      "pitch": 85,
+      "start": 39.0,
+      "duration": 1.5,
+      "velocity": 60
+    },
+    {
+      "pitch": 77,
+      "start": 40.5,
+      "duration": 1.5,
+      "velocity": 64
+    }
+  ],
+  "summary": {
+    "note_count": 16,
+    "total_duration_beats": 48,
+    "total_duration_seconds": 43.6,
+    "pitch_range": [
+      65,
+      87
+    ],
+    "unique_pitches": 8,
+    "average_velocity": 61.7
+  }
+}

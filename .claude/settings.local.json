@@ -12,7 +12,8 @@
       "Bash(pip --version:*)",
       "Bash(PYTHONIOENCODING=utf-8 /c/Python313/python.exe:*)",
       "Bash(/c/Python313/python.exe:*)",
-      "Bash(npm run build:*)"
+      "Bash(npm run build:*)",
+      "WebFetch(domain:midiutil.readthedocs.io)"
     ]
   }
 }
