@@ -1,14 +1,15 @@
 """
 Tool definitions for the Continuous Consciousness Engine.
 
-Defines the 9 tools Claude can use during thought cycles,
+Defines the 13 tools Claude can use during thought cycles,
 plus the execute_tool() dispatcher that processes requests server-side.
 
-Tools fall into 4 categories:
+Tools fall into 5 categories:
 1. Self-configuration — Claude adjusts its own parameters
 2. File writing — Claude writes to scratchpad or research
 3. File reading — Claude reads back files or lists contents
 4. Archive search — Claude searches its own thought history
+5. Working memory — Claude manages high-priority persistent context
 
 Security: execute_tool() is the single gatekeeper. Only known tools
 execute. Path sanitization is handled by FileManager. Unknown tools
@@ -16,6 +17,10 @@ return an error, never crash.
 """
 
 import json
+
+# ── Working memory constants ─────────────────────────────────────────
+
+WORKING_MEMORY_MAX_CHARS = 30_000
 
 # ── Anthropic tool schemas ────────────────────────────────────────────
 
@@ -427,6 +432,98 @@ TOOL_SCHEMAS = [
             "required": ["query"],
         },
     },
+    # ── Working memory tools ─────────────────────────────────────────
+    {
+        "name": "write_working_memory",
+        "description": (
+            "Store data in your working memory under a named key. Working memory "
+            "persists across thought cycles and appears in your system prompt every "
+            "cycle, giving you reliable access to important data without it being "
+            "lost to compaction. Use 'replace' mode (default) to overwrite a key's "
+            "content entirely, or 'append' to add to existing content. "
+            "Total working memory is capped at 30,000 characters across all keys. "
+            "Use this for data you're actively working with: analysis results, "
+            "hypotheses, cross-cycle plans, structured notes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": (
+                        "Name for this memory slot (e.g., 'music_analysis', "
+                        "'current_hypothesis', 'task_plan'). Use snake_case."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The content to store.",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["replace", "append"],
+                    "description": (
+                        "Write mode: 'replace' overwrites the key entirely (default), "
+                        "'append' adds to existing content."
+                    ),
+                },
+            },
+            "required": ["key", "content"],
+        },
+    },
+    {
+        "name": "read_working_memory",
+        "description": (
+            "Read content from your working memory. If a key is provided, returns "
+            "that key's full content. If no key is provided, returns a listing of "
+            "all keys with their sizes. Note: working memory content is also shown "
+            "in your system prompt each cycle, so this tool is mainly useful for "
+            "confirming content or getting a key listing."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "The key to read. Omit to list all keys with sizes.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "clear_working_memory",
+        "description": (
+            "Clear content from your working memory. If a key is provided, clears "
+            "only that key. If no key is provided, clears ALL working memory. "
+            "Working memory is never cleared automatically — only you can clear it "
+            "with this tool. Clear keys when you're done with them to free up "
+            "capacity for new data."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "The key to clear. Omit to clear ALL working memory.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "working_memory_status",
+        "description": (
+            "Show the current state of your working memory: all keys, their "
+            "individual sizes, total usage, and remaining capacity. Use this "
+            "to check how much space you have before writing large content."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
 ]
 
 
@@ -571,6 +668,163 @@ def execute_tool(name, tool_input, file_mgr, state):
         context_lines = tool_input.get("context_lines", 3)
         scope = tool_input.get("scope", "all")
         return file_mgr.search_files(query, max_results, context_lines, scope=scope)
+
+    # ── Working memory tools ─────────────────────────────────────
+
+    if name == "write_working_memory":
+        key = tool_input.get("key", "").strip()
+        content = tool_input.get("content", "")
+        mode = tool_input.get("mode", "replace")
+
+        if not key:
+            return {"error": "key is required and cannot be empty"}
+        if not content:
+            return {"error": "content is required and cannot be empty"}
+        if mode not in ("replace", "append"):
+            return {"error": "mode must be 'replace' or 'append'"}
+
+        wm = state.setdefault("workingMemory", {})
+
+        existing_content = wm.get(key, "")
+        if mode == "append":
+            new_content = existing_content + content
+        else:
+            new_content = content
+
+        new_total = sum(len(v) for k, v in wm.items() if k != key) + len(new_content)
+
+        if new_total > WORKING_MEMORY_MAX_CHARS:
+            current_total = sum(len(v) for v in wm.values())
+            return {
+                "error": (
+                    f"Working memory capacity exceeded. "
+                    f"This write would use {new_total:,} / {WORKING_MEMORY_MAX_CHARS:,} characters. "
+                    f"Current usage: {current_total:,}. "
+                    f"Clear some keys first with clear_working_memory."
+                ),
+                "current_total": current_total,
+                "attempted_total": new_total,
+                "max_capacity": WORKING_MEMORY_MAX_CHARS,
+            }
+
+        wm[key] = new_content
+        new_total_actual = sum(len(v) for v in wm.values())
+
+        result = {
+            "status": "ok",
+            "key": key,
+            "mode": mode,
+            "key_size": len(new_content),
+            "total_usage": new_total_actual,
+            "max_capacity": WORKING_MEMORY_MAX_CHARS,
+            "remaining": WORKING_MEMORY_MAX_CHARS - new_total_actual,
+        }
+
+        usage_pct = new_total_actual / WORKING_MEMORY_MAX_CHARS
+        if usage_pct >= 0.9:
+            result["warning"] = (
+                f"Working memory is {usage_pct:.0%} full "
+                f"({new_total_actual:,} / {WORKING_MEMORY_MAX_CHARS:,} chars). "
+                f"Consider clearing unused keys."
+            )
+        elif usage_pct >= 0.75:
+            result["notice"] = (
+                f"Working memory is {usage_pct:.0%} full "
+                f"({new_total_actual:,} / {WORKING_MEMORY_MAX_CHARS:,} chars)."
+            )
+
+        return result
+
+    if name == "read_working_memory":
+        wm = state.get("workingMemory", {})
+        key = tool_input.get("key", "").strip() if tool_input.get("key") else ""
+
+        if key:
+            if key not in wm:
+                return {
+                    "error": f"Key '{key}' not found in working memory.",
+                    "available_keys": list(wm.keys()) if wm else [],
+                }
+            return {
+                "status": "ok",
+                "key": key,
+                "content": wm[key],
+                "size": len(wm[key]),
+            }
+        else:
+            keys_info = {k: len(v) for k, v in wm.items()}
+            total = sum(keys_info.values())
+            return {
+                "status": "ok",
+                "keys": keys_info,
+                "total_keys": len(keys_info),
+                "total_usage": total,
+                "max_capacity": WORKING_MEMORY_MAX_CHARS,
+                "remaining": WORKING_MEMORY_MAX_CHARS - total,
+            }
+
+    if name == "clear_working_memory":
+        wm = state.setdefault("workingMemory", {})
+        key = tool_input.get("key", "").strip() if tool_input.get("key") else ""
+
+        if key:
+            if key not in wm:
+                return {
+                    "error": f"Key '{key}' not found in working memory.",
+                    "available_keys": list(wm.keys()) if wm else [],
+                }
+            old_size = len(wm[key])
+            del wm[key]
+            new_total = sum(len(v) for v in wm.values())
+            return {
+                "status": "ok",
+                "cleared_key": key,
+                "freed_chars": old_size,
+                "total_usage": new_total,
+                "max_capacity": WORKING_MEMORY_MAX_CHARS,
+                "remaining": WORKING_MEMORY_MAX_CHARS - new_total,
+            }
+        else:
+            old_keys = list(wm.keys())
+            old_total = sum(len(v) for v in wm.values())
+            wm.clear()
+            return {
+                "status": "ok",
+                "cleared_all": True,
+                "cleared_keys": old_keys,
+                "freed_chars": old_total,
+                "total_usage": 0,
+                "max_capacity": WORKING_MEMORY_MAX_CHARS,
+                "remaining": WORKING_MEMORY_MAX_CHARS,
+            }
+
+    if name == "working_memory_status":
+        wm = state.get("workingMemory", {})
+        keys_info = {}
+        for k, v in wm.items():
+            keys_info[k] = {
+                "size": len(v),
+                "preview": v[:100] + ("..." if len(v) > 100 else ""),
+            }
+        total = sum(len(v) for v in wm.values())
+        usage_pct = (total / WORKING_MEMORY_MAX_CHARS * 100) if WORKING_MEMORY_MAX_CHARS > 0 else 0
+
+        result = {
+            "status": "ok",
+            "keys": keys_info,
+            "total_keys": len(keys_info),
+            "total_usage": total,
+            "max_capacity": WORKING_MEMORY_MAX_CHARS,
+            "remaining": WORKING_MEMORY_MAX_CHARS - total,
+            "usage_percent": round(usage_pct, 1),
+        }
+
+        if usage_pct >= 90:
+            result["warning"] = "Working memory nearly full. Consider clearing unused keys."
+        elif usage_pct >= 75:
+            result["notice"] = "Working memory is getting full."
+
+        return result
 
     # ── Music tools ────────────────────────────────────────────────
 

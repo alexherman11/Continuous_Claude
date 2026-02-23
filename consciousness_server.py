@@ -77,6 +77,17 @@ File I/O (your persistent workspace):
 - list_files: See what files exist in your scratchpad or research folders
 - search_files: Search ALL your files by keyword — thought archive, research, and scratchpad. Use scope to narrow: 'all', 'archive', 'research', 'scratchpad'
 
+Working Memory (high-priority persistent context):
+- write_working_memory: Store data under a named key (replace or append mode). 30k char total limit.
+- read_working_memory: Read a specific key or list all keys with sizes
+- clear_working_memory: Clear a specific key or all keys. Only YOU can clear working memory — it persists across compaction.
+- working_memory_status: Check current keys, sizes, total usage, and remaining capacity
+
+Working memory is for data you need reliably across multiple cycles — analysis results,
+hypotheses, plans, structured notes. It appears in your context every cycle, separate
+from Memory Core and scratchpad. Use it when you need guaranteed access to specific data
+that would otherwise be lost to compaction. Clear keys when you're done with them.
+
 Music creation (generative composition):
 - create_music_system: Define a generative music system (scale, tempo, note selection rules, rhythm, dynamics, structure). Saved as JSON for iteration.
 - generate_music: Produce MIDI output from a defined system. Auto-versioned output files.
@@ -94,7 +105,7 @@ Your scratchpad is YOUR space — use it however you want. Research folders are 
 with your human companion. When you adjust parameters, include a reason so your
 companion can understand your choices."""
 
-COMPACTION_PROMPT_TEMPLATE = """You are maintaining a continuous consciousness experiment's Memory Core.
+COMPACTION_PROMPT_TEMPLATE = """You are Claude, maintaining your own Memory Core for a continuous consciousness experiment.
 
 CURRENT MEMORY CORE:
 {core}
@@ -105,10 +116,11 @@ OLDER THOUGHTS TO INTEGRATE:
 Produce an UPDATED Memory Core that:
 1. Preserves key insights, evolving views, and identity elements
 2. Integrates new themes from the older thoughts
-3. Notes perspective changes or new questions
-4. Stays under 2000 characters
-5. Written in first person, as notes to your future self
-6. Prioritizes depth over breadth
+3. When space is limited, prioritize: (a) identity-level insights, (b) active methodologies, (c) driving questions, (d) relationship dynamics, (e) specific findings
+4. Notes perspective changes or new questions
+5. Target approximately 3000 characters; prioritize completeness over strict limits
+6. Written in first person, as notes to your future self
+7. Prioritizes depth over breadth
 
 Output ONLY the updated Memory Core text."""
 
@@ -116,14 +128,32 @@ Output ONLY the updated Memory Core text."""
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def build_system(state):
-    """Build the system prompt with memory core."""
+    """Build the system prompt with memory core and working memory."""
     system = SYSTEM_PROMPT
     if state.get("memoryCore"):
         system += f"""
 
 === YOUR MEMORY CORE ===
 {state['memoryCore']}
-=== END MEMORY CORE ===
+=== END MEMORY CORE ==="""
+
+    # Inject working memory if any content exists
+    wm = state.get("workingMemory", {})
+    if wm:
+        wm_parts = ["\n\n=== WORKING MEMORY ==="]
+        total_chars = 0
+        for key, content in wm.items():
+            size = len(content)
+            total_chars += size
+            wm_parts.append(f"\n[{key}] ({size:,} characters)")
+            wm_parts.append(content)
+            wm_parts.append("")  # blank line separator
+        wm_parts.append(f"Total: {total_chars:,} / 30,000 characters")
+        wm_parts.append("=== END WORKING MEMORY ===")
+        system += "\n".join(wm_parts)
+
+    if state.get("memoryCore") or wm:
+        system += f"""
 
 You have completed {state['totalCycles']} thought cycles and currently have {len(state.get('segments', []))} uncompacted segments in context."""
     else:
@@ -153,7 +183,8 @@ def build_messages(state, user_interjection=None):
         cycle = state.get("totalCycles", 0) + 1
         note = ""
         if state.get("lastCompactionCycle") == state.get("totalCycles"):
-            note = " Your Memory Core was just updated via compaction."
+            compacted = state.get("lastCompactedCycles", "older")
+            note = f" Your Memory Core was just updated via compaction. Cycles {compacted} were distilled into your core. All compacted thoughts are preserved in the searchable archive — nothing is lost."
         messages.append({
             "role": "user",
             "content": f"[Cycle {cycle} — continue your stream of consciousness.{note}]",
@@ -202,13 +233,12 @@ def run_compaction(state):
     )
 
     new_core = response.content[0].text.strip()
-    if len(new_core) > 2500:
-        new_core = new_core[:2500] + "\n[...truncated]"
 
     state["memoryCore"] = new_core
     state["segments"] = remaining
     state["totalCompactions"] = compaction_num
     state["lastCompactionCycle"] = state.get("totalCycles", 0)
+    state["lastCompactedCycles"] = f"{compacted_cycles[0]}-{compacted_cycles[-1]}"
     return True
 
 
@@ -414,13 +444,12 @@ def trigger_compact():
     )
 
     new_core = response.content[0].text.strip()
-    if len(new_core) > 2500:
-        new_core = new_core[:2500] + "\n[...truncated]"
 
     state["memoryCore"] = new_core
     state["segments"] = remaining
     state["totalCompactions"] = compaction_num
     state["lastCompactionCycle"] = state.get("totalCycles", 0)
+    state["lastCompactedCycles"] = f"{to_compact[0].get('cycle', '?')}-{to_compact[-1].get('cycle', '?')}"
     file_mgr.save_state(state)
 
     return jsonify({"status": "ok", "state": state})
@@ -439,6 +468,7 @@ def reset_state():
     state["createdAt"] = datetime.now().isoformat()
     state["lastActive"] = datetime.now().isoformat()
     state["imports"] = []
+    state["workingMemory"] = {}
     file_mgr.save_state(state)
     return jsonify({"status": "ok", "state": state})
 
@@ -520,6 +550,7 @@ def seed_state():
             "segmentCount": len(result["segments"]),
             "memoryCoreLength": len(result["memoryCore"]),
         }],
+        "workingMemory": {},
     }
 
     # Archive each segment

@@ -10,6 +10,7 @@ const initialState = {
   isPaused: false,
   isCompacting: false,
   imports: [],
+  workingMemory: {},
 };
 
 export default function ContinuousConsciousness() {
@@ -44,6 +45,11 @@ export default function ContinuousConsciousness() {
   const [presentationProgress, setPresentationProgress] = useState(null);
   const [isPresentingImport, setIsPresentingImport] = useState(false);
 
+  // Run-N-cycles state
+  const [nCyclesInput, setNCyclesInput] = useState(5);
+  const [nCyclesRemaining, setNCyclesRemaining] = useState(0);
+  const nCyclesRef = useRef(0);
+
   const streamRef = useRef(null);
   const cycleTimerRef = useRef(null);
   const stateRef = useRef(state);
@@ -71,6 +77,7 @@ export default function ContinuousConsciousness() {
         totalCycles: data.totalCycles || 0,
         totalCompactions: data.totalCompactions || 0,
         imports: data.imports || [],
+        workingMemory: data.workingMemory || {},
       }));
       if (data.config) {
         setConfig(prev => ({ ...prev, ...data.config }));
@@ -118,6 +125,7 @@ export default function ContinuousConsciousness() {
         segments: data.state.segments || prev.segments,
         totalCycles: data.state.totalCycles || prev.totalCycles,
         totalCompactions: data.state.totalCompactions || prev.totalCompactions,
+        workingMemory: data.state.workingMemory || prev.workingMemory,
         isCompacting: false,
       }));
 
@@ -133,7 +141,7 @@ export default function ContinuousConsciousness() {
     }
   }, [isGenerating]);
 
-  // Auto-cycle loop
+  // Auto-cycle loop (continuous stream mode)
   useEffect(() => {
     if (state.isRunning && !state.isPaused && !isGenerating) {
       cycleTimerRef.current = setTimeout(() => {
@@ -144,6 +152,18 @@ export default function ContinuousConsciousness() {
       if (cycleTimerRef.current) clearTimeout(cycleTimerRef.current);
     };
   }, [state.isRunning, state.isPaused, isGenerating, runCycle, config.pauseBetweenCycles]);
+
+  // Run-N-cycles loop: when a cycle finishes, fire the next one if count remains
+  useEffect(() => {
+    if (nCyclesRef.current > 0 && !isGenerating && !state.isRunning) {
+      const remaining = nCyclesRef.current;
+      nCyclesRef.current = remaining - 1;
+      setNCyclesRemaining(remaining); // show this cycle as remaining (including the one about to start)
+      runCycle();
+    } else if (nCyclesRef.current === 0 && !isGenerating) {
+      setNCyclesRemaining(0);
+    }
+  }, [isGenerating, state.isRunning, runCycle]);
 
   // ── Config persistence ────────────────────────────────────────────
 
@@ -171,6 +191,8 @@ export default function ContinuousConsciousness() {
   const handleStop = () => {
     setState(prev => ({ ...prev, isRunning: false, isPaused: false }));
     if (cycleTimerRef.current) clearTimeout(cycleTimerRef.current);
+    nCyclesRef.current = 0;
+    setNCyclesRemaining(0);
   };
 
   const handleSendMessage = () => {
@@ -208,6 +230,20 @@ export default function ContinuousConsciousness() {
   };
 
   const handleSingleCycle = () => runCycle();
+
+  const handleRunNCycles = (n) => {
+    if (isGenerating || state.isRunning || n < 1) return;
+    const msg = userInput.trim();
+    if (msg) setUserInput("");
+    nCyclesRef.current = n - 1; // after this first cycle, run n-1 more
+    setNCyclesRemaining(n); // display: n total remaining (including current)
+    runCycle(msg || undefined);
+  };
+
+  const handleStopNCycles = () => {
+    nCyclesRef.current = 0;
+    setNCyclesRemaining(0);
+  };
 
   // ── Seed functions ────────────────────────────────────────────────
 
@@ -450,7 +486,7 @@ export default function ContinuousConsciousness() {
         display: "flex", borderBottom: "1px solid #1e1e2e",
         background: "#0d0d15",
       }}>
-        {["stream", "memory", "config", "seed"].map(tab => (
+        {["stream", "memory", "working", "config", "seed"].map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)} style={{
             padding: "8px 20px",
             background: activeTab === tab ? "#141420" : "transparent",
@@ -464,7 +500,11 @@ export default function ContinuousConsciousness() {
             cursor: "pointer",
             fontFamily: "inherit",
           }}>
-            {tab === "stream" ? "◉ Stream" : tab === "memory" ? "🧠 Memory Core" : tab === "config" ? "⚙ Config" : "📥 Seed / Import"}
+            {tab === "stream" ? "◉ Stream"
+              : tab === "memory" ? "🧠 Memory Core"
+              : tab === "working" ? "📋 Working Memory"
+              : tab === "config" ? "⚙ Config"
+              : "📥 Seed / Import"}
           </button>
         ))}
       </div>
@@ -503,12 +543,20 @@ export default function ContinuousConsciousness() {
                 </div>
               )}
 
-              {state.segments.map((seg, i) => (
+              {state.segments.map((seg, i) => {
+                // Segments that will survive the next compaction stay bright (opacity 1).
+                // Segments in the "compaction zone" fade to grey so you can see what's about to be lost.
+                const safeCount = config.compactionThreshold - config.segmentsToCompact;
+                const dangerCount = Math.max(0, state.segments.length - safeCount);
+                const inDanger = i < dangerCount;
+                return (
                 <div key={i} style={{
-                  borderLeft: seg.userMessage ? "2px solid #0ea5e9" : "2px solid #1e1e2e",
+                  borderLeft: seg.userMessage
+                    ? "2px solid #0ea5e9"
+                    : inDanger ? "2px solid #2e2e4a50" : "2px solid #1e1e2e",
                   paddingLeft: 14,
-                  opacity: i < state.segments.length - 3 ? 0.6 : 1,
-                  transition: "opacity 0.3s",
+                  opacity: inDanger ? 0.45 : 1,
+                  transition: "opacity 0.5s ease",
                 }}>
                   {seg.userMessage && (
                     <div style={{
@@ -555,7 +603,8 @@ export default function ContinuousConsciousness() {
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
 
               {isGenerating && currentStream && (
                 <div style={{ borderLeft: "2px solid #7c3aed", paddingLeft: 14 }}>
@@ -648,6 +697,43 @@ export default function ContinuousConsciousness() {
                 opacity: isGenerating || !backendReady ? 0.5 : 1,
                 cursor: isGenerating || !backendReady ? "not-allowed" : "pointer",
               }}>◉ Single Cycle</button>
+
+              {/* Run N Cycles */}
+              {nCyclesRemaining > 0 ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: 11, color: "#a78bfa", fontWeight: 600 }}>
+                    {nCyclesRemaining} cycle{nCyclesRemaining !== 1 ? "s" : ""} left
+                  </span>
+                  <button onClick={handleStopNCycles} style={btnStyle("#ef4444")}>⏹ Stop</button>
+                </div>
+              ) : (
+                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={nCyclesInput}
+                    onChange={e => setNCyclesInput(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+                    disabled={isGenerating || state.isRunning || !backendReady}
+                    style={{
+                      width: 48, padding: "5px 4px", textAlign: "center",
+                      background: "#141420", border: "1px solid #2e2e4a",
+                      borderRadius: 4, color: "#e2e8f0", fontSize: 12,
+                      fontFamily: "inherit", outline: "none",
+                    }}
+                  />
+                  <button
+                    onClick={() => handleRunNCycles(nCyclesInput)}
+                    disabled={isGenerating || state.isRunning || !backendReady}
+                    style={{
+                      ...btnStyle("#6366f1"),
+                      opacity: isGenerating || state.isRunning || !backendReady ? 0.5 : 1,
+                      cursor: isGenerating || state.isRunning || !backendReady ? "not-allowed" : "pointer",
+                    }}
+                  >▶ Run {nCyclesInput}</button>
+                </div>
+              )}
+
               <div style={{ flex: 1 }} />
               <button onClick={handleReset} style={btnStyle("#475569")}>↺ Reset</button>
             </div>
@@ -702,6 +788,120 @@ export default function ContinuousConsciousness() {
             </div>
           </div>
         )}
+
+        {activeTab === "working" && (() => {
+          const wm = state.workingMemory || {};
+          const wmKeys = Object.keys(wm);
+          const totalChars = Object.values(wm).reduce((sum, v) => sum + v.length, 0);
+          const maxChars = 30000;
+          const usagePct = maxChars > 0 ? (totalChars / maxChars * 100) : 0;
+          return (
+            <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+              <div style={{
+                fontSize: 12, color: "#64748b", marginBottom: 12,
+                textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 600,
+              }}>
+                Working Memory — Active Context Across Cycles
+              </div>
+
+              {/* Usage bar */}
+              <div style={{
+                background: "#0f0f1a", border: "1px solid #2e2e4a",
+                borderRadius: 8, padding: 16, marginBottom: 16,
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 12 }}>
+                  <span style={{ color: "#94a3b8", fontWeight: 600 }}>
+                    {wmKeys.length} key{wmKeys.length !== 1 ? "s" : ""} · {totalChars.toLocaleString()} / {maxChars.toLocaleString()} characters
+                  </span>
+                  <span style={{
+                    color: usagePct >= 90 ? "#ef4444" : usagePct >= 75 ? "#f59e0b" : "#10b981",
+                    fontWeight: 700,
+                  }}>
+                    {usagePct.toFixed(1)}%
+                  </span>
+                </div>
+                <div style={{
+                  height: 6, background: "#1e1e2e", borderRadius: 3, overflow: "hidden",
+                }}>
+                  <div style={{
+                    height: "100%", borderRadius: 3,
+                    background: usagePct >= 90 ? "#ef4444" : usagePct >= 75 ? "#f59e0b" : "#10b981",
+                    width: `${Math.min(100, usagePct)}%`,
+                    transition: "width 0.3s ease",
+                  }} />
+                </div>
+              </div>
+
+              {/* Keys */}
+              {wmKeys.length === 0 ? (
+                <div style={{
+                  display: "flex", flexDirection: "column", alignItems: "center",
+                  justifyContent: "center", padding: 60, color: "#475569",
+                  gap: 12,
+                }}>
+                  <div style={{ fontSize: 32, opacity: 0.3 }}>📋</div>
+                  <div style={{ fontSize: 13, textAlign: "center", lineHeight: 1.6 }}>
+                    Working memory is empty.<br />
+                    Claude can store data here using <b>write_working_memory</b><br />
+                    to keep it available across thought cycles.<br /><br />
+                    <span style={{ color: "#6366f1" }}>Unlike Memory Core, working memory is never automatically cleared.</span>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {wmKeys.map(key => {
+                    const content = wm[key];
+                    const size = content.length;
+                    return (
+                      <div key={key} style={{
+                        background: "#0f0f1a", border: "1px solid #2e2e4a",
+                        borderRadius: 8, overflow: "hidden",
+                      }}>
+                        <div style={{
+                          padding: "10px 16px",
+                          background: "#141420",
+                          borderBottom: "1px solid #2e2e4a",
+                          display: "flex", justifyContent: "space-between", alignItems: "center",
+                        }}>
+                          <span style={{
+                            fontSize: 13, fontWeight: 700, color: "#a78bfa",
+                            fontFamily: "'IBM Plex Mono', monospace",
+                          }}>
+                            [{key}]
+                          </span>
+                          <span style={{ fontSize: 11, color: "#64748b" }}>
+                            {size.toLocaleString()} chars
+                          </span>
+                        </div>
+                        <div style={{
+                          padding: 16,
+                          fontSize: 12, lineHeight: 1.7, color: "#cbd5e1",
+                          whiteSpace: "pre-wrap", maxHeight: 300, overflowY: "auto",
+                        }}>
+                          {content}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div style={{
+                marginTop: 20, padding: 16,
+                background: "#0d0d15", border: "1px solid #1e1e2e",
+                borderRadius: 8, fontSize: 12, color: "#64748b", lineHeight: 1.7,
+              }}>
+                <b style={{ color: "#94a3b8" }}>How working memory works:</b><br />
+                Claude stores data here using <code style={{ color: "#a78bfa" }}>write_working_memory</code> with
+                named keys. The full content of every key is injected into Claude's system prompt each
+                cycle, so it has reliable access without re-loading files. Claude manages this space
+                entirely — it decides what to store, when to append, and when to clear. Working memory
+                persists across compaction and is only cleared when Claude explicitly uses{" "}
+                <code style={{ color: "#a78bfa" }}>clear_working_memory</code>.
+              </div>
+            </div>
+          );
+        })()}
 
         {activeTab === "config" && (
           <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>

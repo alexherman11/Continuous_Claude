@@ -31,6 +31,7 @@ DEFAULT_STATE = {
     "createdAt": None,
     "lastActive": None,
     "imports": [],
+    "workingMemory": {},
 }
 
 
@@ -60,7 +61,11 @@ class FileManager:
             state["lastActive"] = now
             return state
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            state = json.load(f)
+        # Backfill workingMemory for states created before this feature
+        if "workingMemory" not in state:
+            state["workingMemory"] = {}
+        return state
 
     def save_state(self, state):
         """Save engine state to state.json and memory_core.md."""
