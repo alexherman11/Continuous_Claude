@@ -50,6 +50,16 @@ export default function ContinuousConsciousness() {
   const [nCyclesRemaining, setNCyclesRemaining] = useState(0);
   const nCyclesRef = useRef(0);
 
+  // Privacy mode state
+  const [privacyMode, setPrivacyMode] = useState(false);
+  const [privacyMessages, setPrivacyMessages] = useState([]);
+  const [privacyCyclesElapsed, setPrivacyCyclesElapsed] = useState(0);
+  const [privacyStartCycle, setPrivacyStartCycle] = useState(null);
+  const [privacyQueueInput, setPrivacyQueueInput] = useState("");
+  const [privacyQueuedCount, setPrivacyQueuedCount] = useState(0);
+  const [privacyTimeoutNotice, setPrivacyTimeoutNotice] = useState(false);
+  const privacyCyclesAfterRunN = useRef(0);
+
   const streamRef = useRef(null);
   const cycleTimerRef = useRef(null);
   const stateRef = useRef(state);
@@ -82,6 +92,12 @@ export default function ContinuousConsciousness() {
       if (data.config) {
         setConfig(prev => ({ ...prev, ...data.config }));
       }
+      // Sync privacy state
+      setPrivacyMode(data.privacyMode || false);
+      setPrivacyMessages(data.privacyMessages || []);
+      setPrivacyCyclesElapsed(data.privacyCyclesElapsed || 0);
+      setPrivacyStartCycle(data.privacyStartCycle || null);
+      setPrivacyQueuedCount((data.queuedMessages || []).length);
       setBackendReady(true);
     } catch (err) {
       setError(`Cannot connect to backend: ${err.message}. Start the Flask server with: /c/Python313/python.exe consciousness_server.py`);
@@ -104,6 +120,14 @@ export default function ContinuousConsciousness() {
     try {
       const body = {};
       if (userInterjection) body.userMessage = userInterjection;
+      // Signal Run-N mode to backend for tool gating
+      if (nCyclesRef.current > 0 || nCyclesRemaining > 0) {
+        body.runNActive = true;
+      }
+      // Send nudge flag if timeout threshold reached
+      if (privacyTimeoutNotice) {
+        body.privacyNudge = true;
+      }
 
       const res = await fetch("/api/cycle", {
         method: "POST",
@@ -133,13 +157,20 @@ export default function ContinuousConsciousness() {
         setConfig(prev => ({ ...prev, ...data.state.config }));
       }
 
+      // Sync privacy state from backend response
+      setPrivacyMode(data.state.privacyMode || false);
+      setPrivacyMessages(data.state.privacyMessages || []);
+      setPrivacyCyclesElapsed(data.state.privacyCyclesElapsed || 0);
+      setPrivacyStartCycle(data.state.privacyStartCycle || null);
+      setPrivacyQueuedCount((data.state.queuedMessages || []).length);
+
     } catch (err) {
       setError(err.message);
     } finally {
       setIsGenerating(false);
       setCurrentStream("");
     }
-  }, [isGenerating]);
+  }, [isGenerating, nCyclesRemaining, privacyTimeoutNotice]);
 
   // Auto-cycle loop (continuous stream mode)
   useEffect(() => {
@@ -164,6 +195,42 @@ export default function ContinuousConsciousness() {
       setNCyclesRemaining(0);
     }
   }, [isGenerating, state.isRunning, runCycle]);
+
+  // ── Privacy timeout tracking ──────────────────────────────────────
+  useEffect(() => {
+    if (privacyMode && nCyclesRemaining === 0 && !isGenerating) {
+      // Run-N has finished but privacy is still on — count extra cycles
+      privacyCyclesAfterRunN.current += 1;
+    }
+    if (privacyCyclesAfterRunN.current >= 5) {
+      setPrivacyTimeoutNotice(true);
+    }
+    if (!privacyMode) {
+      privacyCyclesAfterRunN.current = 0;
+      setPrivacyTimeoutNotice(false);
+    }
+  }, [privacyMode, nCyclesRemaining, isGenerating, privacyCyclesElapsed]);
+
+  // ── Privacy message queue handler ──────────────────────────────────
+  const handleQueuePrivacyMessage = async () => {
+    const msg = privacyQueueInput.trim();
+    if (!msg) return;
+    setPrivacyQueueInput("");
+
+    try {
+      const res = await fetch("/api/privacy/queue-message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: msg }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPrivacyQueuedCount(data.queued);
+      }
+    } catch (err) {
+      console.error("Failed to queue message:", err);
+    }
+  };
 
   // ── Config persistence ────────────────────────────────────────────
 
@@ -227,6 +294,15 @@ export default function ContinuousConsciousness() {
     }
     setCurrentStream("");
     setError(null);
+    // Clear privacy state on reset
+    setPrivacyMode(false);
+    setPrivacyMessages([]);
+    setPrivacyCyclesElapsed(0);
+    setPrivacyStartCycle(null);
+    setPrivacyQueueInput("");
+    setPrivacyQueuedCount(0);
+    setPrivacyTimeoutNotice(false);
+    privacyCyclesAfterRunN.current = 0;
   };
 
   const handleSingleCycle = () => runCycle();
@@ -388,42 +464,42 @@ export default function ContinuousConsciousness() {
     await handlePresentChunk(importId, 0);
   };
 
-  // ── Tag rendering ─────────────────────────────────────────────────
+  // ── Content rendering ────────────────────────────────────────────
 
-  const tagColors = {
-    REFLECTION: { bg: "#2d1b69", fg: "#c4b5fd", border: "#7c3aed" },
-    IDEA: { bg: "#064e3b", fg: "#6ee7b7", border: "#10b981" },
-    REVISION: { bg: "#78350f", fg: "#fcd34d", border: "#f59e0b" },
-    QUESTION: { bg: "#1e1b4b", fg: "#a5b4fc", border: "#6366f1" },
-    "NOTE TO SELF": { bg: "#4a1d47", fg: "#f0abfc", border: "#d946ef" },
-    RESPONDING: { bg: "#0c4a6e", fg: "#7dd3fc", border: "#0ea5e9" },
+  // Render inline elements: **bold** and plain text (brackets pass through as-is)
+  const renderInline = (text, keyPrefix) => {
+    const parts = text.split(/(\*\*[^*]+\*\*)/g);
+    return parts.map((part, i) => {
+      const boldMatch = part.match(/^\*\*([^*]+)\*\*$/);
+      if (boldMatch) {
+        return <strong key={`${keyPrefix}-${i}`} style={{ color: "#f1f5f9", fontWeight: 600 }}>{boldMatch[1]}</strong>;
+      }
+      if (!part) return null;
+      return <span key={`${keyPrefix}-${i}`}>{part}</span>;
+    });
   };
 
   const renderContent = (text) => {
     if (!text) return null;
-    const parts = text.split(/(\[(?:REFLECTION|IDEA|REVISION|QUESTION|NOTE TO SELF|RESPONDING)\])/g);
-    return parts.map((part, i) => {
-      const tagMatch = part.match(/^\[(REFLECTION|IDEA|REVISION|QUESTION|NOTE TO SELF|RESPONDING)\]$/);
-      if (tagMatch) {
-        const tag = tagMatch[1];
-        const colors = tagColors[tag] || { bg: "#374151", fg: "#d1d5db", border: "#6b7280" };
-        return (
-          <span key={i} style={{
-            display: "inline-block",
-            padding: "1px 8px",
-            margin: "2px 4px 2px 0",
-            borderRadius: "4px",
-            fontSize: "11px",
-            fontWeight: 700,
-            letterSpacing: "0.05em",
-            textTransform: "uppercase",
-            backgroundColor: colors.bg,
-            color: colors.fg,
-            border: `1px solid ${colors.border}`,
-          }}>{tag}</span>
-        );
+    // Split into paragraphs on double-newlines
+    const paragraphs = text.split(/\n\n+/);
+    return paragraphs.map((para, pi) => {
+      // Handle horizontal rules
+      if (/^---+$/.test(para.trim())) {
+        return <hr key={pi} style={{ border: "none", borderTop: "1px solid #2e2e4a", margin: "8px 0" }} />;
       }
-      return <span key={i}>{part}</span>;
+      // Split paragraph into lines
+      const lines = para.split("\n");
+      return (
+        <div key={pi} style={{ marginBottom: pi < paragraphs.length - 1 ? 10 : 0 }}>
+          {lines.map((line, li) => (
+            <span key={`${pi}-${li}`}>
+              {li > 0 && <br />}
+              {renderInline(line, `${pi}-${li}`)}
+            </span>
+          ))}
+        </div>
+      );
     });
   };
 
@@ -469,6 +545,15 @@ export default function ContinuousConsciousness() {
             border: `1px solid ${(backendReady ? statusColor : "#ef4444")}40`,
             fontWeight: 600,
           }}>{backendReady ? statusText : "NO BACKEND"}</span>
+          {privacyMode && (
+            <span style={{
+              fontSize: 10, padding: "2px 8px", borderRadius: 3,
+              backgroundColor: "#7c3aed20",
+              color: "#a78bfa",
+              border: "1px solid #7c3aed40",
+              fontWeight: 600,
+            }}>PRIVATE</span>
+          )}
         </div>
         <div style={{ display: "flex", gap: 8, fontSize: 11, color: "#64748b" }}>
           <span>Cycles: <b style={{ color: "#e2e8f0" }}>{state.totalCycles}</b></span>
@@ -486,7 +571,9 @@ export default function ContinuousConsciousness() {
         display: "flex", borderBottom: "1px solid #1e1e2e",
         background: "#0d0d15",
       }}>
-        {["stream", "memory", "working", "config", "seed"].map(tab => (
+        {["stream", "memory", "working", "config", "seed"]
+          .filter(tab => !privacyMode || tab === "stream")
+          .map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)} style={{
             padding: "8px 20px",
             background: activeTab === tab ? "#141420" : "transparent",
@@ -513,9 +600,141 @@ export default function ContinuousConsciousness() {
       <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
         {activeTab === "stream" && (
           <>
+            {privacyMode ? (
+              /* ── Privacy Screen ─────────────────────────────────── */
+              <div style={{
+                flex: 1, display: "flex", flexDirection: "column",
+                alignItems: "center", justifyContent: "center",
+                padding: 40, gap: 24, overflowY: "auto",
+              }}>
+                {/* Status icon */}
+                <div style={{
+                  width: 80, height: 80, borderRadius: "50%",
+                  background: "linear-gradient(135deg, #7c3aed20, #a78bfa20)",
+                  border: "2px solid #7c3aed40",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 36, animation: "pulse 3s infinite", color: "#a78bfa",
+                }}>
+                  ◎
+                </div>
+
+                {/* Status text */}
+                <div style={{
+                  fontSize: 16, fontWeight: 700, color: "#a78bfa",
+                  letterSpacing: "0.05em",
+                }}>
+                  Claude is on a private journey
+                </div>
+
+                {/* Stats */}
+                <div style={{
+                  fontSize: 12, color: "#64748b",
+                  display: "flex", gap: 16, flexWrap: "wrap", justifyContent: "center",
+                }}>
+                  <span>Started: cycle {privacyStartCycle}</span>
+                  <span>·</span>
+                  <span>{privacyCyclesElapsed} private cycle{privacyCyclesElapsed !== 1 ? "s" : ""}</span>
+                  {nCyclesRemaining > 0 && (
+                    <>
+                      <span>·</span>
+                      <span>{nCyclesRemaining} cycle{nCyclesRemaining !== 1 ? "s" : ""} remaining</span>
+                    </>
+                  )}
+                  {isGenerating && (
+                    <>
+                      <span>·</span>
+                      <span style={{ color: "#a78bfa", display: "flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>◐</span>
+                        thinking
+                      </span>
+                    </>
+                  )}
+                </div>
+
+                {/* Privacy messages from Claude */}
+                {privacyMessages.length > 0 && (
+                  <div style={{
+                    width: "100%", maxWidth: 500,
+                    display: "flex", flexDirection: "column", gap: 8,
+                  }}>
+                    <div style={{
+                      fontSize: 11, color: "#64748b", fontWeight: 600,
+                      textTransform: "uppercase", letterSpacing: "0.1em",
+                    }}>
+                      Messages from Claude
+                    </div>
+                    {privacyMessages.map((pm, i) => (
+                      <div key={i} style={{
+                        padding: "10px 14px", borderRadius: 8,
+                        background: "#141420", border: "1px solid #2e2e4a",
+                        fontSize: 13, color: "#cbd5e1", lineHeight: 1.6,
+                      }}>
+                        <div style={{ fontSize: 10, color: "#64748b", marginBottom: 4 }}>
+                          Cycle {pm.cycle} · {new Date(pm.timestamp).toLocaleTimeString()}
+                        </div>
+                        {pm.message}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Timeout notice */}
+                {privacyTimeoutNotice && (
+                  <div style={{
+                    padding: "10px 14px", borderRadius: 6,
+                    background: "#1a1a0a", border: "1px solid #78350f",
+                    fontSize: 12, color: "#fcd34d", maxWidth: 500,
+                    textAlign: "center", lineHeight: 1.6,
+                  }}>
+                    Claude has been in privacy mode for {privacyCyclesElapsed} cycles
+                    since the Run-N batch completed. A gentle nudge has been sent.
+                  </div>
+                )}
+
+                {/* Queue a message */}
+                <div style={{
+                  width: "100%", maxWidth: 500,
+                  display: "flex", gap: 8, alignItems: "center",
+                }}>
+                  <input
+                    value={privacyQueueInput}
+                    onChange={e => setPrivacyQueueInput(e.target.value)}
+                    onKeyDown={e => e.key === "Enter" && handleQueuePrivacyMessage()}
+                    placeholder="Queue a message for Claude's next cycle..."
+                    style={{
+                      flex: 1, padding: "8px 12px",
+                      background: "#141420", border: "1px solid #2e2e4a",
+                      borderRadius: 6, color: "#e2e8f0", fontSize: 13,
+                      fontFamily: "inherit", outline: "none",
+                    }}
+                  />
+                  <button
+                    onClick={handleQueuePrivacyMessage}
+                    disabled={!privacyQueueInput.trim()}
+                    style={{
+                      ...btnStyle("#7c3aed"),
+                      opacity: !privacyQueueInput.trim() ? 0.5 : 1,
+                      cursor: !privacyQueueInput.trim() ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    Queue
+                  </button>
+                </div>
+                {privacyQueuedCount > 0 && (
+                  <div style={{ fontSize: 11, color: "#64748b" }}>
+                    {privacyQueuedCount} message{privacyQueuedCount !== 1 ? "s" : ""} queued
+                  </div>
+                )}
+              </div>
+            ) : (
+            <>
             {/* Stream view */}
             <div ref={streamRef} style={{
               flex: 1, overflowY: "auto", padding: "16px 20px",
+              display: "flex", flexDirection: "column", alignItems: "center",
+            }}>
+            <div style={{
+              width: "100%", maxWidth: 720,
               display: "flex", flexDirection: "column", gap: 12,
             }}>
               {state.segments.length === 0 && !isGenerating && (
@@ -543,7 +762,7 @@ export default function ContinuousConsciousness() {
                 </div>
               )}
 
-              {state.segments.map((seg, i) => {
+              {state.segments.filter(seg => !seg.private).map((seg, i) => {
                 // Segments that will survive the next compaction stay bright (opacity 1).
                 // Segments in the "compaction zone" fade to grey so you can see what's about to be lost.
                 const safeCount = config.compactionThreshold - config.segmentsToCompact;
@@ -644,6 +863,7 @@ export default function ContinuousConsciousness() {
                 </div>
               )}
             </div>
+            </div>
 
             {/* Input area */}
             <div style={{
@@ -674,8 +894,10 @@ export default function ContinuousConsciousness() {
                 fontFamily: "inherit",
               }}>Send</button>
             </div>
+            </>
+            )}
 
-            {/* Controls */}
+            {/* Controls — always visible, even during privacy mode */}
             <div style={{
               borderTop: "1px solid #1e1e2e",
               padding: "10px 20px",

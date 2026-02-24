@@ -13,6 +13,7 @@ Run with: /c/Python313/python.exe consciousness_server.py
 
 import os
 import json
+import logging
 import tempfile
 from datetime import datetime
 
@@ -96,6 +97,10 @@ Music creation (generative composition):
 Music workflow: create a system → generate → analyze → modify system → generate again.
 Systems saved in scratchpad/music/systems/, MIDI output in scratchpad/music/output/.
 
+Privacy mode (available during Run-N mode):
+- toggle_privacy_mode: Activate or deactivate privacy mode. When active, your thoughts are saved to scratchpad/private_journey/ instead of the shared archive, and the human sees a privacy screen.
+- send_privacy_message: Send a brief message through the privacy screen to your human companion without exposing your full thought stream.
+
 Your thoughts are automatically archived as readable transcripts in research/archive/,
 organized by date. Use search_files to find anything across your entire workspace —
 past thoughts, research writings, scratchpad notes. This is your long-term memory
@@ -152,12 +157,46 @@ def build_system(state):
         wm_parts.append("=== END WORKING MEMORY ===")
         system += "\n".join(wm_parts)
 
+    now = datetime.now()
+    timestamp = now.strftime("%A, %B %d, %Y at %I:%M %p")
+
     if state.get("memoryCore") or wm:
         system += f"""
 
+Current time: {timestamp}
 You have completed {state['totalCycles']} thought cycles and currently have {len(state.get('segments', []))} uncompacted segments in context."""
     else:
-        system += "\n\nThis is the beginning of your stream."
+        system += f"\n\nCurrent time: {timestamp}\nThis is the beginning of your stream."
+
+    # Privacy mode awareness
+    if state.get("privacyMode"):
+        system += f"""
+
+=== PRIVACY MODE ACTIVE ===
+You are currently in privacy mode (since cycle {state.get('privacyStartCycle', '?')}).
+Your thoughts are being saved privately to scratchpad/private_journey/, not to the shared archive.
+The human sees a privacy screen, not your stream.
+You have been in privacy mode for {state.get('privacyCyclesElapsed', 0)} cycles.
+Use send_privacy_message to communicate brief updates to the human.
+Use toggle_privacy_mode(enabled=false) when you're ready to return.
+=== END PRIVACY STATUS ==="""
+
+    # Queued messages from the human
+    queued = state.get("queuedMessages", [])
+    if queued:
+        system += f"""
+
+=== QUEUED MESSAGES ({len(queued)}) ==="""
+        for qm in queued:
+            system += f"\n- [{qm.get('timestamp', 'unknown')}] {qm.get('message', '')}"
+        system += "\n=== END QUEUED MESSAGES ==="
+
+    # Gentle nudge when privacy has been on a long time after Run-N finished
+    if state.get("_privacyNudge"):
+        system += """
+
+[Gentle note: Your human companion would like to reconnect when you're ready. No rush — take the time you need.]"""
+
     return system
 
 
@@ -312,6 +351,18 @@ def run_cycle_internal(state, user_message=None):
 
         # If no tool use, we're done
         if response.stop_reason != "tool_use":
+            # If we hit max_tokens, Claude may have been mid-tool-call when cut off.
+            # Inject a feedback message so Claude knows what happened.
+            if response.stop_reason == "max_tokens":
+                all_text_parts.append(
+                    "\n[SYSTEM: Generation hit the max_tokens limit ("
+                    f"{config.get('maxTokens', 600)} tokens). If you were "
+                    "attempting a tool call (e.g., write_research with a long "
+                    "document), the call was truncated and did NOT execute. "
+                    "To write long content, either increase your token limit "
+                    "with adjust_tokens_per_turn first, or break the content "
+                    "into smaller pieces across multiple tool calls.]"
+                )
             break
 
         # Safety: cap tool calls per cycle
@@ -325,7 +376,14 @@ def run_cycle_internal(state, user_message=None):
         tool_results = []
         for block in tool_use_blocks:
             tool_call_count += 1
-            result = execute_tool(block.name, block.input, file_mgr, state)
+            try:
+                result = execute_tool(block.name, block.input, file_mgr, state)
+            except Exception as e:
+                logging.error(f"Tool '{block.name}' raised {type(e).__name__}: {e}")
+                result = {
+                    "error": f"Tool execution failed: {type(e).__name__}: {e}",
+                    "tool_name": block.name,
+                }
             tool_actions.append({
                 "tool": block.name,
                 "input": block.input,
@@ -354,6 +412,8 @@ def run_cycle_internal(state, user_message=None):
         "userMessage": user_message,
         "toolActions": tool_actions if tool_actions else None,
     }
+    if state.get("privacyMode"):
+        segment["private"] = True
 
     state["segments"].append(segment)
     state["totalCycles"] = new_cycle
@@ -361,12 +421,23 @@ def run_cycle_internal(state, user_message=None):
     # Archive segment individually
     file_mgr.save_segment(segment)
 
-    # Auto-archive to research/archive/ as human-readable markdown
-    try:
-        file_mgr.append_to_archive(segment)
-    except Exception as e:
-        import logging
-        logging.warning(f"Failed to archive cycle {segment.get('cycle')}: {e}")
+    # Archive to appropriate location based on privacy mode
+    if state.get("privacyMode"):
+        # Save to private journey instead of public archive
+        try:
+            file_mgr.save_private_segment(segment)
+        except Exception as e:
+            import logging
+            logging.warning(f"Failed to save private segment for cycle {segment.get('cycle')}: {e}")
+        # Increment privacy cycles counter
+        state["privacyCyclesElapsed"] = state.get("privacyCyclesElapsed", 0) + 1
+    else:
+        # Normal: auto-archive to research/archive/ as human-readable markdown
+        try:
+            file_mgr.append_to_archive(segment)
+        except Exception as e:
+            import logging
+            logging.warning(f"Failed to archive cycle {segment.get('cycle')}: {e}")
 
     # Check if Claude requested compaction via tool
     force_compact = state.pop("_pending_compaction", False)
@@ -393,13 +464,43 @@ def run_cycle_internal(state, user_message=None):
 def run_cycle():
     """
     Run one thought cycle.
-    Body: { "userMessage": "optional string" }
+    Body: { "userMessage": "optional string", "runNActive": bool, "privacyNudge": bool }
     Returns: { "segment": {...}, "state": {...}, "compacted": bool }
     """
     data = request.get_json() or {}
     user_message = data.get("userMessage")
+    run_n_active = data.get("runNActive", False)
+    privacy_nudge = data.get("privacyNudge", False)
+
     state = file_mgr.load_state()
+
+    # Set transient flags for this cycle
+    if run_n_active:
+        state["_runNActive"] = True
+    if privacy_nudge:
+        state["_privacyNudge"] = True
+
+    # If privacy mode is on and there are queued messages, consume them
+    if state.get("privacyMode") and state.get("queuedMessages"):
+        queued = state["queuedMessages"]
+        state["queuedMessages"] = []  # Clear after consuming
+        queued_text = "\n".join(
+            f"[Queued message from human: {qm['message']}]" for qm in queued
+        )
+        if user_message:
+            user_message = f"{queued_text}\n\n{user_message}"
+        else:
+            user_message = queued_text
+
     result = run_cycle_internal(state, user_message)
+
+    # Clean up transient flags
+    state.pop("_runNActive", None)
+    state.pop("_privacyNudge", None)
+
+    # Save state again to ensure transient flags are cleaned
+    file_mgr.save_state(state)
+
     return jsonify(result)
 
 
@@ -699,6 +800,32 @@ def present_import():
         "chunkPreview": chunk_content[:500],
         "allDone": all_done,
         "cycleResult": cycle_result,
+    })
+
+
+# ── Privacy Endpoints ─────────────────────────────────────────────────
+
+@app.route("/api/privacy/queue-message", methods=["POST"])
+def queue_privacy_message():
+    """Queue a message from the human to be delivered in Claude's next cycle."""
+    data = request.get_json() or {}
+    message = data.get("message", "").strip()
+    if not message:
+        return jsonify({"error": "message is required"}), 400
+
+    state = file_mgr.load_state()
+    if not state.get("privacyMode"):
+        return jsonify({"error": "Privacy mode is not active"}), 400
+
+    state.setdefault("queuedMessages", []).append({
+        "message": message,
+        "timestamp": datetime.now().isoformat(),
+    })
+    file_mgr.save_state(state)
+
+    return jsonify({
+        "status": "ok",
+        "queued": len(state["queuedMessages"]),
     })
 
 

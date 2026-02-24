@@ -13,7 +13,9 @@
       "Bash(PYTHONIOENCODING=utf-8 /c/Python313/python.exe:*)",
       "Bash(/c/Python313/python.exe:*)",
       "Bash(npm run build:*)",
-      "WebFetch(domain:midiutil.readthedocs.io)"
+      "WebFetch(domain:midiutil.readthedocs.io)",
+      "Bash(grep:*)",
+      "Bash(git add:*)"
     ]
   }
 }

@@ -32,6 +32,12 @@ DEFAULT_STATE = {
     "lastActive": None,
     "imports": [],
     "workingMemory": {},
+    # Privacy mode fields
+    "privacyMode": False,
+    "privacyStartCycle": None,
+    "privacyCyclesElapsed": 0,
+    "privacyMessages": [],      # Messages Claude sends OUT through the privacy screen
+    "queuedMessages": [],       # Messages human queues for Claude's next cycle
 }
 
 
@@ -65,6 +71,13 @@ class FileManager:
         # Backfill workingMemory for states created before this feature
         if "workingMemory" not in state:
             state["workingMemory"] = {}
+        # Backfill privacy fields for states created before this feature
+        if "privacyMode" not in state:
+            state["privacyMode"] = False
+            state["privacyStartCycle"] = None
+            state["privacyCyclesElapsed"] = 0
+            state["privacyMessages"] = []
+            state["queuedMessages"] = []
         return state
 
     def save_state(self, state):
@@ -156,6 +169,58 @@ class FileManager:
             f.write(entry_text)
 
         return {"status": "ok", "file": f"research/archive/{filename}", "cycle": cycle}
+
+    def save_private_segment(self, segment):
+        """
+        Save a segment to the private journey folder instead of the public archive.
+        Each cycle gets its own timestamped markdown file in scratchpad/private_journey/.
+        """
+        timestamp_str = segment.get("timestamp", "")
+        cycle = segment.get("cycle", 0)
+
+        private_dir = os.path.join(self.scratchpad_dir, "private_journey")
+        os.makedirs(private_dir, exist_ok=True)
+
+        # Build timestamp-based filename for chronological ordering
+        if timestamp_str and timestamp_str != "imported":
+            try:
+                dt = datetime.fromisoformat(timestamp_str)
+                file_ts = dt.strftime("%Y%m%d_%H%M%S")
+                time_str = dt.strftime("%H:%M:%S")
+            except (ValueError, TypeError):
+                file_ts = f"cycle_{cycle:04d}"
+                time_str = "unknown"
+        else:
+            file_ts = f"cycle_{cycle:04d}"
+            time_str = "unknown"
+
+        filename = f"{file_ts}_cycle_{cycle:04d}.md"
+        filepath = os.path.join(private_dir, filename)
+
+        # Build markdown entry
+        entry_parts = []
+        entry_parts.append(f"# Private Cycle {cycle} | {time_str}\n\n")
+
+        user_msg = segment.get("userMessage")
+        if user_msg:
+            entry_parts.append(f"**Context:** {user_msg}\n\n")
+
+        content = segment.get("content", "")
+        entry_parts.append(f"{content}\n\n")
+
+        tool_actions = segment.get("toolActions")
+        if tool_actions:
+            tool_names = [a.get("tool", "unknown") for a in tool_actions]
+            entry_parts.append(f"**Tools used:** {', '.join(tool_names)}\n")
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("".join(entry_parts))
+
+        return {
+            "status": "ok",
+            "file": f"scratchpad/private_journey/{filename}",
+            "cycle": cycle,
+        }
 
     def archive_memory_core(self, memory_core, compaction_number, compacted_cycles=None):
         """
@@ -379,9 +444,21 @@ class FileManager:
         """Write a file to scratchpad/. Returns status dict."""
         safe_path = self._sanitize_path(path)
         full_path = os.path.join(self.scratchpad_dir, safe_path)
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        with open(full_path, "w", encoding="utf-8") as f:
-            f.write(content)
+
+        # Verify resolved path stays within scratchpad directory
+        resolved = os.path.realpath(full_path)
+        if not resolved.startswith(os.path.realpath(self.scratchpad_dir)):
+            return {"error": "Access denied: path resolves outside scratchpad directory"}
+
+        try:
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except PermissionError:
+            return {"error": f"Permission denied writing to scratchpad/{safe_path}"}
+        except OSError as e:
+            return {"error": f"OS error writing file: {e}"}
+
         return {"status": "ok", "path": f"scratchpad/{safe_path.replace(os.sep, '/')}", "bytes": len(content.encode("utf-8"))}
 
     def list_scratchpad(self, subfolder=None):
@@ -406,9 +483,21 @@ class FileManager:
             return {"error": f"Invalid subfolder. Allowed: {self.ALLOWED_RESEARCH_SUBFOLDERS}"}
         safe_name = self._sanitize_path(filename)
         full_path = os.path.join(self.research_dir, subfolder, safe_name)
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        with open(full_path, "w", encoding="utf-8") as f:
-            f.write(content)
+
+        # Verify resolved path stays within research directory
+        resolved = os.path.realpath(full_path)
+        if not resolved.startswith(os.path.realpath(self.research_dir)):
+            return {"error": "Access denied: path resolves outside research directory"}
+
+        try:
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except PermissionError:
+            return {"error": f"Permission denied writing to research/{subfolder}/{safe_name}"}
+        except OSError as e:
+            return {"error": f"OS error writing file: {e}"}
+
         return {"status": "ok", "path": f"research/{subfolder}/{safe_name.replace(os.sep, '/')}", "bytes": len(content.encode("utf-8"))}
 
     def list_research(self, subfolder=None):
@@ -423,8 +512,91 @@ class FileManager:
 
     DEFAULT_READ_LIMIT = 8000  # Default max chars returned per read
 
-    def read_file(self, category, path, offset=0, limit=None):
-        """Read a file from scratchpad/ or research/. Supports pagination."""
+    def read_file(self, category, path, offset=0, limit=None, view_range=None):
+        """Read a file from scratchpad/ or research/. Supports pagination and line ranges."""
+        if category == "scratchpad":
+            base = self.scratchpad_dir
+        elif category == "research":
+            base = self.research_dir
+        else:
+            return {"error": f"Invalid category: {category}"}
+
+        safe_path = self._sanitize_path(path)
+        full_path = os.path.join(base, safe_path)
+
+        # Verify the resolved path is still within the base
+        resolved = os.path.realpath(full_path)
+        if not resolved.startswith(os.path.realpath(base)):
+            return {"error": "Access denied: path outside allowed directory"}
+
+        if not os.path.exists(full_path):
+            return {"error": f"File not found: {category}/{safe_path}"}
+
+        display_path = f"{category}/{safe_path}".replace(os.sep, "/")
+
+        with open(full_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Line-based reading when view_range is provided
+        if view_range and len(view_range) == 2:
+            lines = content.splitlines(keepends=True)
+            total_lines = len(lines)
+            start_line = max(1, view_range[0])
+            end_line = total_lines if view_range[1] == -1 else min(view_range[1], total_lines)
+
+            if start_line > total_lines:
+                return {
+                    "error": f"start_line {start_line} exceeds total lines ({total_lines})",
+                    "path": display_path,
+                    "total_lines": total_lines,
+                }
+
+            selected = lines[start_line - 1 : end_line]
+            numbered = "".join(
+                f"{start_line + i:4d} | {line}" for i, line in enumerate(selected)
+            )
+
+            return {
+                "content": numbered,
+                "path": display_path,
+                "total_lines": total_lines,
+                "view_range": [start_line, end_line],
+                "lines_shown": len(selected),
+            }
+
+        # Character-based pagination (existing behavior)
+        total_chars = len(content)
+        read_limit = limit if limit is not None else self.DEFAULT_READ_LIMIT
+
+        # Apply offset and limit
+        if offset > 0:
+            content = content[offset:]
+        truncated = len(content) > read_limit
+        content = content[:read_limit]
+
+        result = {
+            "content": content,
+            "path": display_path,
+            "total_chars": total_chars,
+            "offset": offset,
+            "chars_returned": len(content),
+        }
+
+        if truncated:
+            remaining = total_chars - offset - len(content)
+            result["truncated"] = True
+            result["hint"] = (
+                f"File truncated ({len(content)} of {total_chars} chars shown, "
+                f"{remaining} remaining). Use offset={offset + len(content)} "
+                f"to read the next page, or use search_files to find specific content."
+            )
+
+        return result
+
+    # ── File editing ──────────────────────────────────────────────────
+
+    def str_replace_in_file(self, category, path, old_str, new_str):
+        """Replace exactly one occurrence of old_str with new_str in a file."""
         if category == "scratchpad":
             base = self.scratchpad_dir
         elif category == "research":
@@ -446,33 +618,37 @@ class FileManager:
         with open(full_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        total_chars = len(content)
-        read_limit = limit if limit is not None else self.DEFAULT_READ_LIMIT
+        count = content.count(old_str)
+        if count == 0:
+            return {
+                "error": (
+                    "old_str not found in file. Make sure it matches exactly "
+                    "(including whitespace and newlines)."
+                ),
+            }
+        if count > 1:
+            return {
+                "error": (
+                    f"old_str appears {count} times in the file. It must appear "
+                    f"exactly once. Include more surrounding context to make "
+                    f"the match unique."
+                ),
+            }
 
-        # Apply offset and limit
-        if offset > 0:
-            content = content[offset:]
-        truncated = len(content) > read_limit
-        content = content[:read_limit]
+        new_content = content.replace(old_str, new_str, 1)
 
-        result = {
-            "content": content,
-            "path": f"{category}/{safe_path.replace(os.sep, '/')}",
-            "total_chars": total_chars,
-            "offset": offset,
-            "chars_returned": len(content),
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+        display_path = f"{category}/{safe_path}".replace(os.sep, "/")
+        return {
+            "status": "ok",
+            "path": display_path,
+            "old_size": len(content),
+            "new_size": len(new_content),
+            "chars_replaced": len(old_str),
+            "chars_inserted": len(new_str),
         }
-
-        if truncated:
-            remaining = total_chars - offset - len(content)
-            result["truncated"] = True
-            result["hint"] = (
-                f"File truncated ({len(content)} of {total_chars} chars shown, "
-                f"{remaining} remaining). Use offset={offset + len(content)} "
-                f"to read the next page, or use search_files to find specific content."
-            )
-
-        return result
 
     # ── Imports ───────────────────────────────────────────────────────
 

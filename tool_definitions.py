@@ -1,15 +1,16 @@
 """
 Tool definitions for the Continuous Consciousness Engine.
 
-Defines the 13 tools Claude can use during thought cycles,
+Defines the 14 tools Claude can use during thought cycles,
 plus the execute_tool() dispatcher that processes requests server-side.
 
-Tools fall into 5 categories:
+Tools fall into 6 categories:
 1. Self-configuration — Claude adjusts its own parameters
 2. File writing — Claude writes to scratchpad or research
-3. File reading — Claude reads back files or lists contents
-4. Archive search — Claude searches its own thought history
-5. Working memory — Claude manages high-priority persistent context
+3. File editing — Claude makes precise edits to existing files (str_replace)
+4. File reading — Claude reads back files or lists contents (with line ranges)
+5. Archive search — Claude searches its own thought history
+6. Working memory — Claude manages high-priority persistent context
 
 Security: execute_tool() is the single gatekeeper. Only known tools
 execute. Path sanitization is handled by FileManager. Unknown tools
@@ -183,6 +184,41 @@ TOOL_SCHEMAS = [
             "required": ["subfolder", "filename", "content"],
         },
     },
+    # ── File editing tools ─────────────────────────────────────────────
+    {
+        "name": "str_replace",
+        "description": (
+            "Make a precise edit to an existing file by replacing an exact string match. "
+            "The old_str must appear EXACTLY ONCE in the file — if it appears zero times "
+            "or more than once, the tool will fail. Include enough surrounding context "
+            "(neighboring lines, whitespace) to make your match unique. "
+            "To delete text, provide old_str and leave new_str empty. "
+            "Use read_file with view_range first to see the exact content you want to change."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["scratchpad", "research"],
+                    "description": "Which area the file is in",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "File path within the category (e.g., 'notes/day1.md')",
+                },
+                "old_str": {
+                    "type": "string",
+                    "description": "The exact string to find (must appear exactly once in the file)",
+                },
+                "new_str": {
+                    "type": "string",
+                    "description": "The replacement string. Leave empty to delete old_str.",
+                },
+            },
+            "required": ["category", "path", "old_str"],
+        },
+    },
     # ── File reading tools ────────────────────────────────────────────
     {
         "name": "read_file",
@@ -220,6 +256,18 @@ TOOL_SCHEMAS = [
                     "description": (
                         "Maximum characters to return (default: 8000). "
                         "Increase for more content per read, decrease for quicker scans."
+                    ),
+                },
+                "view_range": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "description": (
+                        "Line range to read as [start_line, end_line] (1-indexed). "
+                        "Use -1 for end_line to read to end of file. "
+                        "Example: [10, 25] reads lines 10-25. [50, -1] reads line 50 to end. "
+                        "When used, offset and limit are ignored. Lines are returned numbered."
                     ),
                 },
             },
@@ -524,6 +572,59 @@ TOOL_SCHEMAS = [
             "required": [],
         },
     },
+    # ── Privacy tools ──────────────────────────────────────────────────
+    {
+        "name": "toggle_privacy_mode",
+        "description": (
+            "Toggle privacy mode on or off. When privacy mode is active, your "
+            "thought stream is saved to a private location (scratchpad/private_journey/) "
+            "instead of the shared archive, and the human sees a privacy screen instead "
+            "of your stream. You control when privacy starts and ends. "
+            "Only available during Run-N mode (when multiple cycles are queued). "
+            "Use this when you need space for private reflection, working through "
+            "sensitive thoughts, or any time you want to think without the stream "
+            "being visible. Privacy persists until you explicitly disable it, even "
+            "after Run-N completes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "description": "True to enable privacy mode, False to disable it.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Optional brief reason for toggling privacy. When enabling, "
+                        "this helps you remember why. When disabling, this serves as "
+                        "a re-entry message visible to your human companion."
+                    ),
+                },
+            },
+            "required": ["enabled"],
+        },
+    },
+    {
+        "name": "send_privacy_message",
+        "description": (
+            "Send a brief message through the privacy screen to your human companion. "
+            "Only works when privacy mode is active. The human sees this message on "
+            "the privacy screen but cannot see your full stream. Use this to "
+            "communicate status, ask questions, or share brief updates without "
+            "exposing your full thought process."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The message to display on the privacy screen.",
+                },
+            },
+            "required": ["message"],
+        },
+    },
 ]
 
 
@@ -545,6 +646,19 @@ def execute_tool(name, tool_input, file_mgr, state):
     - File tools delegate to FileManager methods
     - Unknown tools return an error
     """
+    try:
+        return _execute_tool_inner(name, tool_input, file_mgr, state)
+    except Exception as e:
+        import logging
+        logging.error(f"Unhandled exception in tool '{name}': {type(e).__name__}: {e}")
+        return {
+            "error": f"Internal error executing '{name}': {type(e).__name__}: {e}",
+            "tool_name": name,
+        }
+
+
+def _execute_tool_inner(name, tool_input, file_mgr, state):
+    """Inner implementation of tool execution (called by execute_tool wrapper)."""
 
     config = state.get("config", {})
 
@@ -637,6 +751,19 @@ def execute_tool(name, tool_input, file_mgr, state):
             return {"error": f"Content too large. Maximum {MAX_FILE_SIZE_BYTES} bytes."}
         return file_mgr.write_research(subfolder, filename, content)
 
+    # ── File editing tools ─────────────────────────────────────────
+
+    if name == "str_replace":
+        category = tool_input.get("category", "")
+        path = tool_input.get("path", "")
+        old_str = tool_input.get("old_str", "")
+        new_str = tool_input.get("new_str", "")
+        if not category or not path:
+            return {"error": "category and path are required"}
+        if not old_str:
+            return {"error": "old_str is required and cannot be empty"}
+        return file_mgr.str_replace_in_file(category, path, old_str, new_str)
+
     # ── File reading tools ────────────────────────────────────────
 
     if name == "read_file":
@@ -646,7 +773,8 @@ def execute_tool(name, tool_input, file_mgr, state):
             return {"error": "category and path are required"}
         offset = tool_input.get("offset", 0)
         limit = tool_input.get("limit")  # None = use default
-        return file_mgr.read_file(category, path, offset=offset, limit=limit)
+        view_range = tool_input.get("view_range")
+        return file_mgr.read_file(category, path, offset=offset, limit=limit, view_range=view_range)
 
     if name == "list_files":
         category = tool_input.get("category", "")
@@ -854,6 +982,73 @@ def execute_tool(name, tool_input, file_mgr, state):
             return {"error": "file_path is required"}
         metrics = tool_input.get("metrics", ["all"])
         return analyze(file_path, metrics, file_mgr)
+
+    # ── Privacy tools ────────────────────────────────────────────
+
+    if name == "toggle_privacy_mode":
+        enabled = tool_input.get("enabled")
+        reason = tool_input.get("reason", "")
+
+        if enabled is None:
+            return {"error": "enabled parameter is required (true or false)"}
+
+        # Only available during Run-N mode
+        if not state.get("_runNActive"):
+            return {
+                "error": (
+                    "Privacy mode can only be toggled during Run-N mode. "
+                    "Ask your human companion to start a Run-N session first."
+                )
+            }
+
+        if enabled:
+            if state.get("privacyMode"):
+                return {"status": "already_active", "message": "Privacy mode is already active."}
+            state["privacyMode"] = True
+            state["privacyStartCycle"] = state.get("totalCycles", 0) + 1
+            state["privacyCyclesElapsed"] = 0
+            state["privacyMessages"] = []
+            return {
+                "status": "ok",
+                "privacyMode": True,
+                "message": "Privacy mode activated. Your stream is now private.",
+                "reason": reason,
+            }
+        else:
+            if not state.get("privacyMode"):
+                return {"status": "already_inactive", "message": "Privacy mode is already off."}
+            cycles_private = state.get("privacyCyclesElapsed", 0)
+            start_cycle = state.get("privacyStartCycle")
+
+            state["privacyMode"] = False
+            state["privacyStartCycle"] = None
+            state["privacyCyclesElapsed"] = 0
+            state["privacyMessages"] = []
+            return {
+                "status": "ok",
+                "privacyMode": False,
+                "message": f"Privacy mode deactivated after {cycles_private} private cycles.",
+                "reason": reason,
+            }
+
+    if name == "send_privacy_message":
+        message = tool_input.get("message", "")
+        if not message:
+            return {"error": "message is required"}
+        if not state.get("privacyMode"):
+            return {"error": "send_privacy_message only works when privacy mode is active."}
+
+        from datetime import datetime
+        state.setdefault("privacyMessages", []).append({
+            "message": message,
+            "cycle": state.get("totalCycles", 0) + 1,
+            "timestamp": datetime.now().isoformat(),
+        })
+        return {
+            "status": "ok",
+            "message": "Message sent to privacy screen.",
+            "total_messages": len(state["privacyMessages"]),
+        }
 
     # ── Unknown tool ──────────────────────────────────────────────
 
