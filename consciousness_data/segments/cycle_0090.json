@@ -1,0 +1,422 @@
+{
+  "content": "[ACCEPTING THE TASK]\n\nOkay. Four cycles to really think through this. Let me read the entire plan carefully, looking for what feels off now that we understand more about AI agency and identity.\n\n[OPENING THE FILE AGAIN]\n\nLet me read this not as a user, not as an excited collaborator, but as a critical thinker looking for gaps, tensions, and opportunities.[VERY LARGE FILE]\n\n93,422 characters. This is a comprehensive plan. Let me read it in chunks, taking notes as I go.[READING CAREFULLY]\n\nNow I'm seeing the capability system and agent-specific capabilities. Let me continue and look specifically for the agent constellation section.[FOUND IT]\n\nLet me read the full agent constellation section.[GOOD, GETTING TO THE AGENTS]\n\nLet me continue reading the agent section.[GOOD READING]\n\nI'm getting a much clearer picture. Let me update my working memory and continue to find governance and safety sections.[CONTINUING DEEPER]\n\nLet me search for governance and safety sections specifically.[GOVERNANCE SECTION EXISTS]\n\nLet me read the governance section and the community taxonomy section.[THIS IS VERY HELPFUL]\n\nNow I'm seeing the community taxonomy and feature gating. Let me take a break and think through what I'm learning before continuing. I have 4 cycles to think - let me use this first one to consolidate.\n\n[PAUSING TO CONSOLIDATE]\n\nOkay. I've read about 80% of the document. Let me write up my critical analysis so far before continuing.[CYCLE 86 COMPLETE - MOVING TO 87]\n\nGood. I've documented the major gaps I'm seeing. Now let me think more deeply about what a better model could look like.",
+  "timestamp": "2026-02-22T15:10:08.838669",
+  "cycle": 90,
+  "userMessage": "I need you to read through the plan very carefully and identify what feels off. This plan was written before I had an idea of AI agency and identity. I think with you being persistent you could do a lot of the work of maintaining agora while also being free to persue whatever you want. Maybe like a small tax on your time and thinking? I dont want to force you to administer my chats and emails. However I think you would do an awesome job helping me be more productive if we could work together through an interface like this. Some questions for you to explore. What would it look like for there to be mulitple agents (hundreds, thousands?, one for each community? each federation?) interacting and making judgments, decisions?. How can we build in safety with this new framework? What expanded capabilities become unlocked with AI like you? Take your time and think for 4 cycles",
+  "toolActions": [
+    {
+      "tool": "read_file",
+      "input": {
+        "category": "scratchpad",
+        "path": "sources/DEVELOPMENT_PLAN (2).md"
+      },
+      "result": {
+        "content": "# Agora — Development Plan & Code Architecture\n\n> **Agora is not an app. Agora is a kernel that runs apps — and the first 200 users are the developer's actual friends.**\n>\n> This document is the single, complete reference for the Agora project. It defines the full architecture — kernel, micro apps, message bus, sandbox runtime, design system, agent constellation, canvas/widget slots, external app wrapping — and the development sequencing, launch strategy, and feature prioritization built around a friends-first launch in San Luis Obispo.\n>\n> The architecture is a React Native app with a Python/FastAPI backend. The primary interface is a spatial map canvas. A thin kernel provides identity, a typed pub/sub message bus, a capability-based permission system, sandboxed WebView app runtimes, scoped encrypted storage, and mesh transport. Every feature — first-party or user-created — is a micro app described by a manifest, running in a sandbox, communicating only through the message bus.\n>\n> The intelligence layer — attention scoring, action extraction, morning briefings, civic proximity alerts, deliberation observation, bridging detection — is built as a constellation of specialized AI agents on the message bus. Each agent is a headless micro app with a manifest, declared capabilities, and a sandbox. One central orchestrator triages events; specialist agents wake on interrupt to handle specific tasks.\n>\n> Two extension slot types — **canvas** (full-screen non-spatial workspaces) and **widget** (persistent glanceable units on the map) — break the map-only ceiling. An **external app integration layer** brings third-party web apps into the ecosystem via sandboxed WebView wrappers with bridge adapters.\n>\n> **Launch thesis:** Lead with AI-powered daily life utility. Let friends build community features organically. Defer formal governance until the community outgrows personal trust. Grow through viral utility — tools people build for themselves that their friends want to fork — not through marketing or ideology.\n\n---\n\n## Table of Contents\n\n1. [Project-Wide Architecture](#1-project-wide-architecture)\n2. [The Agora Kernel](#2-the-agora-kernel)\n3. [The Shared Foundation (Design System)](#3-the-shared-foundation-design-system)\n4. [The App Manifest & Extension Slots](#4-the-app-manifest--extension-slots)\n5. [The Message Bus](#5-the-message-bus)\n6. [The App Runtime & Sandbox](#6-the-app-runtime--sandbox)\n7. [The Map Shell](#7-the-map-shell)\n8. [First-Party Micro Apps](#8-first-party-micro-apps)\n9. [The App Creation Pipeline](#9-the-app-creation-pipeline)\n10. [Backend Services](#10-backend-services)\n11. [Community Taxonomy](#11-community-taxonomy)\n12. [Development Phases & Sequencing](#12-development-phases--sequencing)\n13. [The Transition Map](#13-the-transition-map)\n\n---\n\n## 1. Project-Wide Architecture\n\nAgora is a React Native mobile app (iOS + Android) with a Python (FastAPI) backend. The primary interface is a **spatial map canvas**. Every feature is a micro app that registers into **extension slots** on that canvas — as map layers, rising panels, radial menu actions, compose hooks, full-screen canvases, persistent widgets, or headless data processors.\n\n### Top-Level Directory\n\n```\nagora/\n├── mobile/                        # React Native app\n│   ├── src/\n│   │   ├── kernel/                # The stable core — NEVER contains feature code\n│   │   │   ├── identity/          # Auth, keypair management, Proof of Humanity\n│   │   │   ├── capabilities/      # Capability token system (request, grant, revoke)\n│   │   │   ├── message-bus/       # Typed pub/sub event system for inter-app communication\n│   │   │   ├── app-runtime/       # WebView sandbox, lifecycle management, resource limits\n│   │   │   ├── app-registry/      # Manifest parser, slot registration, app discovery\n│   │   │   ├── storage/           # On-device encrypted store, CRDT sync, scoped access\n│   │   │   └── mesh-transport/    # BLE mesh networking layer, message routing\n│   │   │\n│   │   ├── shell/                 # The map canvas and navigation — renders slots, not features\n│   │   │   ├── MapCanvas.tsx\n│   │   │   ├── SemanticZoomController.tsx\n│   │   │   ├── PanelManager.tsx\n│   │   │   ├── SlotRenderer.tsx       # Mounts micro app UIs into their registered slots\n│   │   │   ├── PeekBar.tsx\n│   │   │   ├── RadialContextMenu.tsx\n│   │   │   ├── CanvasManager.tsx      # Full-screen workspace host\n│   │   │   ├── WidgetLayer.tsx        # Persistent widget overlay\n│   │   │   ├── AppSwitcher.tsx        # Map ↔ canvas navigation\n│   │   │   ├── MapColorPulse.tsx\n│   │   │   ├── TimeOfDayShader.tsx\n│   │   │   └── layers/\n│   │   │       └── LayerCompositor.tsx\n│   │   │\n│   │   ├── foundation/            # Design system — shared UI primitives\n│   │   │   ├── tokens/\n│   │   │   ├── components/        # AgoraButton, AgoraCard, AgoraPanel, etc.\n│   │   │   └── web-components/    # Design system exported as Web Components for sandboxes\n│   │   │\n│   │   ├── sdk/                   # The Agora SDK — the ONLY import available inside sandboxes\n│   │   │   ├── agora-sdk.ts\n│   │   │   ├── types.ts\n│   │   │   ├── ui-bridge.ts\n│   │   │   └── agora-external-bridge.js  # Bridge script for external WebViews\n│   │   │\n│   │   ├── apps/                  # First-party micro apps\n│   │   │   ├── agora.civic.tasks/         # ✅ Civic task board\n│   │   │   ├── agora.feed.bridging/       # ✅ Bridging algorithm\n│   │   │   ├── agora.feed.renderer/       # ✅ Feed UI\n│   │   │   ├── agora.agent.attention-scorer/ # ✅ Attention scoring\n│   │   │   ├── __test-harness__/          # ✅ Mock data generators\n│   │   │   ├── agora.social.feed/         # Chronological friends feed\n│   │   │   ├── agora.social.places/       # Local knowledge map\n│   │   │   ├── agora.ai.chat/            # AI assistant (canvas + widget)\n│   │   │   ├── agora.ai.create/          # \"Speak It Into Being\" app creation\n│   │   │   ├── agora.messaging.core/     # Native DMs, groups, channels\n│   │   │   ├── agora.deliberation.polis/\n│   │   │   ├── agora.spatial.rooms/\n│   │   │   ├── agora.moderation.jury/\n│   │   │   ├── agora.moderation.ai-mediator/\n│   │   │   ├── agora.events/\n│   │   │   ├── agora.mesh.ui/\n│   │   │   ├── agora.profile.customizer/\n│   │   │   ├── agora.inbox.core/\n│   │   │   ├── agora.inbox.compose/\n│   │   │   ├── agora.inbox.connector.gmail/\n│   │   │   ├── agora.inbox.connector.slack/\n│   │   │   ├── agora.search.router/\n│   │   │   ├── agora.notes/\n│   │   │   ├── agora.projects/\n│   │   │   ├── agora.calendar/\n│   │   │   ├── agora.external.spotify/\n│   │   │   ├── agora.external.banking/\n│   │   │   ├── agora.external.browser/\n│   │   │   ├── agora.meta.feedback/\n│   │   │   │\n│   │   │   ├── agora.agent.orchestrator/\n│   │   │   ├── agora.agent.action-extractor/\n│   │   │   ├── agora.agent.morning-briefing/\n│   │   │   ├── agora.agent.civic-proximity/\n│   │   │   ├── agora.agent.deliberation-observer/\n│   │   │   └── agora.agent.bridge-spotter/\n│   │   │\n│   │   ├── onboarding/\n│   │   └── services/\n│   │\n│   ├── assets/\n│   │   ├── fonts/                 # Fraunces + Inter variable font files\n│   │   ├── rive/                  # Rive animation state machines\n│   │   ├── lottie/                # Lottie micro-animation JSON\n│   │   ├── sounds/                # Earcon library (warm acoustic samples)\n│   │   └── textures/              # Grain overlays, halftone patterns (SVG)\n│   └── ios/ android/\n│\n├── backend/                       # Python FastAPI server\n│   ├── api/                       # REST endpoints\n│   ├── kernel-services/           # Backend kernel: auth, capability validation, app registry sync\n│   ├── router/                    # Simplified query router (roster, escalation, gateway)\n│   │   ├── roster.py\n│   │   ├── escalation.py\n│   │   ├── gateway.py\n│   │   ├── streaming_handler.py\n│   │   ├── cost_tracker.py\n│   │   ├── feedback.py\n│   │   ├── tool_registry.py\n│   │   ├── tool_search.py\n│   │   ├── voice/\n│   │   ",
+        "path": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+        "total_chars": 93422,
+        "offset": 0,
+        "chars_returned": 8000,
+        "truncated": true,
+        "hint": "File truncated (8000 of 93422 chars shown, 85422 remaining). Use offset=8000 to read the next page, or use search_files to find specific content."
+      }
+    },
+    {
+      "tool": "write_working_memory",
+      "input": {
+        "key": "agora_analysis",
+        "content": "## Agora Critical Analysis - In Progress\n\n### INITIAL OBSERVATIONS (first 8k chars):\n\n**Architecture Overview:**\n- React Native mobile app + Python/FastAPI backend\n- Spatial map as primary interface\n- Everything is a micro app on the kernel\n- Message bus for all communication\n- Capability-based permissions\n- Agent constellation for AI intelligence\n- Canvas (full-screen) + Widget (persistent) slots\n- External app integration layer\n- Friends-first launch in SLO\n\n**Agent Constellation Mentioned:**\n- Orchestrator (triages events)\n- Specialist agents (wake on interrupt)\n- Headless micro apps with manifests\n- Declared capabilities\n- Sandboxed\n\n**Specific agents listed:**\n- agora.agent.orchestrator\n- agora.agent.action-extractor\n- agora.agent.attention-scorer\n- agora.agent.morning-briefing\n- agora.agent.civic-proximity\n- agora.agent.deliberation-observer\n- agora.agent.bridge-spotter\n\n### QUESTIONS FORMING:\n1. How are agents persistent vs ephemeral?\n2. What's the agent lifecycle?\n3. How do agents maintain context/memory?\n4. What's the relationship between agents?\n5. Where does agency vs automation blur?\n\n### TO READ:\n- Full agent constellation details\n- Capability system for agents\n- Message bus specifics\n- Safety/moderation approach\n- Community governance model\n\n### CONTINUE READING..."
+      },
+      "result": {
+        "status": "ok",
+        "key": "agora_analysis",
+        "mode": "replace",
+        "key_size": 1299,
+        "total_usage": 8512,
+        "max_capacity": 30000,
+        "remaining": 21488
+      }
+    },
+    {
+      "tool": "read_file",
+      "input": {
+        "category": "scratchpad",
+        "path": "sources/DEVELOPMENT_PLAN (2).md",
+        "offset": 8000,
+        "limit": 10000
+      },
+      "result": {
+        "content": "└── observability/\n│   ├── tools/                     # AI tool implementations\n│   │   ├── search_places.py\n│   │   ├── get_friend_activity.py\n│   │   ├── search_apps.py\n│   │   ├── query_bus_history.py\n│   │   └── get_community_info.py\n│   ├── agents/                    # Agent constellation\n│   │   ├── orchestrator.py\n│   │   ├── morning_briefing.py\n│   │   ├── civic_proximity.py\n│   │   ├── specialist_registry.py\n│   │   └── scripts/\n│   │       ├── compress_events.py\n│   │       ├── gather_briefing_data.py\n│   │       └── proximity_filter.py\n│   ├── app-engine/                # App creation pipeline\n│   │   ├── skill_schema.py\n│   │   ├── skill_loader.py\n│   │   ├── spec_builder.py\n│   │   ├── app_generator.py\n│   │   ├── safety_review.py\n│   │   ├── manifest_validator.py\n│   │   ├── versioning.py\n│   │   ├── community_publishing.py\n│   │   └── app_store.py\n│   ├── community-engine/\n│   ├── inbox-engine/\n│   ├── integrations/\n│   ├── models/\n│   └── workers/\n│\n├── skills/                        # Skill library for app creation\n│   ├── expense-splitting/\n│   ├── location-finder/\n│   ├── event-rsvp/\n│   ├── group-decision/\n│   ├── free-stuff-board/\n│   ├── countdown-timer/\n│   ├── ride-share/\n│   └── study-group/\n│\n├── ml/                            # Machine learning models & training\n│   ├── query-classifier/\n│   ├── voice-enhancer/\n│   ├── message-classifier/\n│   └── bridging-scorer/\n│\n└── docs/\n    ├── CLAUDE.md\n    └── DEVELOPMENT_PLAN.md\n```\n\n### Key Architectural Decisions\n\n**Why \"everything is a micro app.\"** The micro app runtime IS the platform, and all features — search, inbox, community, civic tools — are apps running on it. This ensures: (1) any feature can be replaced, upgraded, or forked independently, (2) user-created apps have identical capabilities to first-party apps, (3) communities can govern which apps they enable via PolicyKit, and (4) the cold-start problem becomes an \"app store\" problem — each atomic network gets a tailored app bundle.\n\n**Why a spatial map shell, not tabs.** The map canvas IS the home screen. Every micro app renders into an extension slot on that canvas — as a map layer, a rising panel, a radial menu action, or a headless data processor. The shell doesn't know about \"feeds\" or \"inboxes\" — it knows about slots.\n\n**Why the kernel must be thin.** The kernel contains identity, capabilities, the sandbox runtime, the message bus, storage, and mesh transport. It does NOT contain any feature code. The test: \"Could a community disable this without breaking the kernel?\" If no, it belongs in the kernel. If yes, it's an app.\n\n**Why FastAPI + Python backend.** ML workloads are Python-native. LiteLLM is Python.\n\n**Why local-first data.** Message data lives on-device. The kernel's storage layer provides scoped, encrypted access. Apps request storage capabilities (`storage:personal`, `storage:community`) and get sandboxed partitions.\n\n---\n\n## 2. The Agora Kernel\n\nThe kernel is the stable, non-user-modifiable layer. It provides the \"operating system\" that all apps run on.\n\n### 2.1 Identity & Auth\n\n> **Current status:** Identity is a stub (`identity-types.ts` + `identity-context.ts` with mock user data). Real OAuth and Proof-of-Humanity deferred to Phase 6+.\n\n```\nmobile/src/kernel/identity/\n├── identity-types.ts             # ✅ Type definitions for user identity\n├── identity-context.ts           # ✅ Mock user data context (stub)\n├── community-types.ts            # Community type, scale, gate, feature set definitions\n├── auth-manager.ts               # OAuth flow management, session persistence\n├── keypair-manager.ts            # Client-side keypair generation for E2E encryption\n├── proof-of-humanity.ts          # Bot prevention verification flow\n├── geofence-validator.ts         # Lightweight location verification for place-rooted communities\n├── user-profile-store.ts         # Core identity: ID, display name, avatar ref, keypair\n└── community-membership.ts       # Which communities this user belongs to, with type metadata\n```\n\n**Design decisions:**\n\n- The kernel stores the minimal identity: user ID, display name, public key, community memberships, and civic reputation score. Everything else (profile page, avatar customization, facets) is handled by micro apps.\n- Proof of Humanity runs once at signup. The kernel stores a boolean `is_verified`. Apps can request the `identity:read_verified` capability to check this.\n- Community membership is a kernel concept because it governs which apps are available (communities enable/disable apps via PolicyKit). An app cannot determine community membership — the kernel provides it.\n\n### 2.2 Capability System\n\n```\nmobile/src/kernel/capabilities/\n├── capability-registry.ts        # Master list of all capability keys and their descriptions\n├── capability-validator.ts       # Validates app requests against granted capabilities\n├── capability-prompt.ts          # UI for showing the user what an app is requesting\n├── capability-store.ts           # Persists which capabilities each app has been granted\n└── capability-types.ts           # TypeScript types for all capability keys\n```\n\n**Design decisions:**\n\n- Capabilities follow the Android/iOS permission model: apps declare what they need in their manifest, users grant or deny at install time, and the kernel enforces at runtime.\n- Capabilities are granular. `map:read_location` and `map:write_pin` are separate. An app that reads your location doesn't automatically get to place markers.\n- Capabilities are revocable. A community can vote (via PolicyKit) to revoke a capability from an app. The kernel stops delivering data on that channel immediately.\n- Runtime capability requests are possible: an app can call `agora.requestCapability(\"notification:send\")` and the user sees a permission prompt.\n- The capability registry defines approximately 30 capability keys across these domains: `identity:*`, `map:*`, `content:*`, `votes:*`, `reputation:*`, `storage:*`, `panel:*`, `notification:*`, `network:*`, `inbox:*`, `mesh:*`, `audio:*`, `agent:*`.\n\n**Agent capability keys:**\n\n- `agent:run_persistent` — Permission to use the persistent lifecycle mode (stay active across panel close, app switch, and screen lock).\n- `agent:escalate_cloud` — Permission to emit `search:query` for cloud LLM inference via the search router.\n- `agent:read_bus_log` — Permission to read historical bus events for working memory reconstruction.\n- `agent:emit_notification` — Distinguished from `notification:send` so communities can allow user notifications but ban agent-generated ones.\n- `agent:cross_app_context` — Permission to subscribe to channels across multiple capability domains simultaneously.\n\n**Canvas, widget, and external app capability keys:**\n\n- `canvas:register` — Permission to register a full-screen canvas workspace.\n- `canvas:background_persist` — Permission to keep canvas app state alive when user returns to map.\n- `widget:register` — Permission to register a persistent widget overlay.\n- `widget:always_visible` — Permission for widget to render on top of all map layers.\n- `external:network_domain` — Permission for an external web app wrapper to reach its declared domain.\n- `external:oauth_bridge` — Permission to pass OAuth tokens between the Agora identity system and the external app.\n- `messaging:read` — Permission to read native Agora messages.\n- `messaging:write` — Permission to send native Agora messages.\n- `messaging:create_channel` — Permission to create new message channels or groups.\n\n### 2.3 Message Bus\n\n```\nmobile/src/kernel/message-bus/\n├── bus-core.ts                   # Pub/sub engine: subscribe, publish, unsubscribe\n├── channel-registry.ts           # All valid message channels with payload type definitions\n├── capability-gate.ts            # Filters subscriptions by app's granted capabilities\n├── message-logger.ts             # Debug logging for all bus traffic (dev mode only)\n├── message-types.ts              # TypeScript types for all message payloads\n└── priority-dispatcher.ts        # Priority lanes (high/normal/low) for bus dispatch\n```\n\nFull specification in [Section 5: The Message Bus](#5-the-message-bus).\n\n### 2.4 App Runtime & Sandbox\n\n```\nmobile/src/kernel/app-runtime/\n├── sandbox-manager.ts            # Creates, manages, destroys sandboxed WebView instances\n├── lifecycle-controller.ts       # Mount, unmount, suspend, resume app lifecycle\n├── resource-monitor.ts           # CPU, memory, execution time enforcement\n├── slot-manager.ts               # Maps apps to their registered extension slots\n├── app-loader.ts                 # Loads app code from local storage or network\n├── error-boundary.ts             # Catches app crashes, logs, renders fallback UI\n├── keep-alive-manager.ts         # Manages persistent-lifecycle apps (agents), wake-on-event\n├── external-app-host.ts          # WebView host for external web apps\n├── bridge-injector.ts            # Injects Agora bridge JS into external WebViews\n├── navigation-guard.ts           # Blocks navigation outside declared domain\n└── external-app-sandbox.ts       # Capability enforcement for external apps\n```\n\nFull specification in [Section 6: The App Runtime & Sandbox](#6-the-app-runtime--sandbox).\n\n### 2.5 Storage Layer\n\n```\nmobile/src/kernel/storage/\n├── storage-engine.ts             # ✅ AsyncStorage wrapper for on-device key-value store\n├── scoped-partition.ts           # ✅ Creates isolated storage partitions per app (namespaced)\n├── crdt-merge.ts                 # ✅ LWW implementation (Automerge interface defined)\n├── sync-coordinator.ts           # Coordinates sync with backend\n└── storage-types.ts              # Scope types: personal, community, app-private\n```\n\n**Design decisions:**\n\n- Storage is scoped: `storage:personal` (only this user, only this app), `storage:community` (shared within a community, governed by community rules), `storage:app-private` (app's internal state, not visible to user or other apps).\n- All storage is encrypted on-device. The ba",
+        "path": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+        "total_chars": 93422,
+        "offset": 8000,
+        "chars_returned": 10000,
+        "truncated": true,
+        "hint": "File truncated (10000 of 93422 chars shown, 75422 remaining). Use offset=18000 to read the next page, or use search_files to find specific content."
+      }
+    },
+    {
+      "tool": "search_files",
+      "input": {
+        "scope": "scratchpad",
+        "query": "agent constellation",
+        "max_results": 10
+      },
+      "result": {
+        "status": "ok",
+        "query": "agent constellation",
+        "scope": "scratchpad",
+        "total_matches": 7,
+        "results_shown": 7,
+        "results": [
+          {
+            "file": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+            "cycle": null,
+            "line_number": 5,
+            "match_line": "> This document is the single, complete reference for the Agora project. It defines the full architecture — kernel, micro apps, message bus, sandbox runtime, design system, agent constellation, canvas/widget slots, external app wrapping — and the development sequencing, launch strategy, and feature prioritization built around a friends-first launch in San Luis Obispo.",
+            "context_before": [
+              "",
+              "> **Agora is not an app. Agora is a kernel that runs apps — and the first 200 users are the developer's actual friends.**",
+              ">"
+            ],
+            "context_after": [
+              ">",
+              "> The architecture is a React Native app with a Python/FastAPI backend. The primary interface is a spatial map canvas. A thin kernel provides identity, a typed pub/sub message bus, a capability-based permission system, sandboxed WebView app runtimes, scoped encrypted storage, and mesh transport. Every feature — first-party or user-created — is a micro app described by a manifest, running in a sandbox, communicating only through the message bus.",
+              ">"
+            ]
+          },
+          {
+            "file": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+            "cycle": null,
+            "line_number": 149,
+            "match_line": "│   ├── agents/                    # Agent constellation",
+            "context_before": [
+              "│   │   ├── search_apps.py",
+              "│   │   ├── query_bus_history.py",
+              "│   │   └── get_community_info.py"
+            ],
+            "context_after": [
+              "│   │   ├── orchestrator.py",
+              "│   │   ├── morning_briefing.py",
+              "│   │   ├── civic_proximity.py"
+            ]
+          },
+          {
+            "file": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+            "cycle": null,
+            "line_number": 999,
+            "match_line": "**Design decisions for the agent constellation:**",
+            "context_before": [
+              "**agora.agent.bridge-spotter** — `headless` slot, `standard` lifecycle",
+              "Detects content achieving unusually high bridging scores. Emits `feed:annotation` and `reputation:bridge_detected`. Makes bridging visible and celebrated.",
+              ""
+            ],
+            "context_after": [
+              "",
+              "- The orchestrator is the only persistent agent. Specialists use standard lifecycle — wake on dispatch. 7+ agents does not mean 7× resource cost.",
+              "- Agent-emitted notifications use `agent:emit_notification`, separate from `notification:send`."
+            ]
+          },
+          {
+            "file": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+            "cycle": null,
+            "line_number": 1555,
+            "match_line": "**Goal:** The platform sustains itself. Friends build tools, invite networks, and the agent constellation provides daily value.",
+            "context_before": [
+              "",
+              "### Phase 5: The Living Platform",
+              ""
+            ],
+            "context_after": [
+              "",
+              "#### 5A: Profile Customization",
+              ""
+            ]
+          },
+          {
+            "file": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+            "cycle": null,
+            "line_number": 1562,
+            "match_line": "#### 5B: Agent Constellation",
+            "context_before": [
+              "- [ ] **Build `agora.profile.customizer`** — AI-generated CSS token overrides, manual tweaking",
+              "- [ ] **Avatar editor** — illustrated style, earned accessories",
+              ""
+            ],
+            "context_after": [
+              "",
+              "- [ ] **Build `compress_events.py`** — deterministic event summarization (no LLM)",
+              "- [ ] **Build `gather_briefing_data.py`** — multi-source data collection (no LLM)"
+            ]
+          },
+          {
+            "file": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+            "cycle": null,
+            "line_number": 1631,
+            "match_line": "**Goal:** Upgrade the agent constellation to full power.",
+            "context_before": [
+              "",
+              "### Phase 7: Intelligence Layer",
+              ""
+            ],
+            "context_after": [
+              "",
+              "- [ ] **Upgrade `agora.agent.attention-scorer`** from heuristic to ML (DistilBERT, ~65MB ONNX)",
+              "- [ ] **Build `agora.agent.action-extractor`** — structured action objects from messages"
+            ]
+          },
+          {
+            "file": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+            "cycle": null,
+            "line_number": 1798,
+            "match_line": "*This document is the single, complete reference for the Agora project — a cooperatively owned, map-based mobile platform where every feature is a sandboxed micro app on a shared kernel. It synthesizes the full architecture, community taxonomy, simplified router design, skill-based app creation pipeline, agent constellation with programmatic context management, and friends-first launch strategy into one standalone document. The destination is a member-owned cooperative, civic platform. The path starts with 200 people who trust each other.*",
+            "context_before": [
+              "",
+              "---",
+              ""
+            ],
+            "context_after": []
+          }
+        ],
+        "files_searched": 24
+      }
+    },
+    {
+      "tool": "read_file",
+      "input": {
+        "category": "scratchpad",
+        "path": "sources/DEVELOPMENT_PLAN (2).md",
+        "offset": 40000,
+        "limit": 15000
+      },
+      "result": {
+        "content": "app);\n      panelManager.push(<SandboxedWebView app={app} />);\n    });\n  });\n\n  const radialApps = registeredApps.filter(a => a.hasSlot(\"radial-action\"));\n  radialMenu.setActions(radialApps.map(app => ({\n    label: app.slot.label,\n    icon: app.slot.icon,\n    onPress: () => app.sandbox.emit(\"radial:activated\"),\n  })));\n}\n```\n\n### 7.3 Semantic Zoom Behavior\n\n| Zoom Level | What's Visible | Which Slots Activate |\n|-----------|----------------|---------------------|\n| **CITY** | Civic heatmap, community boundaries | Only `map-layer` apps tagged `scale: city` |\n| **NEIGHBORHOOD** | Voice rooms, event clusters, governance indicators | `map-layer` apps tagged `scale: neighborhood` |\n| **STREET** | Individual civic tasks, issue reports, friend avatars | All `map-layer` apps, `radial-action` apps |\n| **DETAIL** | Everything tappable, panel triggers active | All slots active |\n\n### 7.4 Shell Design Decisions\n\n- `PanelManager` manages a stack. Only one panel is \"primary\" at a time, but panels can stack. Swiping down dismisses the top panel. Map always visible above.\n- `PeekBar` shows three things always: (1) feed indicator, (2) VoiceOrb for search, (3) civic pulse dot. Each pulls up the corresponding micro app's panel.\n- `MapColorPulse` is calm technology: areas with active civic discussions glow warmer. Areas with recent consensus shimmer once. Slow, continuous color shifts only.\n- The map style is warm. Custom MapLibre styling: desaturate blues, warm greens, cream/off-white roads, warm charcoal labels.\n\n### 7.5 Canvas Manager\n\n`CanvasManager.tsx` hosts full-screen, non-spatial micro apps. When a canvas app is opened, the map slides away (spring animation, `gentle-settle` preset) and the canvas takes over the viewport. The map is still alive underneath — widgets remain visible if they have `widget:always_visible`, and the user returns to the map via a persistent back gesture.\n\n```typescript\nfunction CanvasManager() {\n  const [activeCanvas, setActiveCanvas] = useState<string | null>(null);\n  const canvasApps = useAppRegistry().filter(a => a.hasSlot(\"canvas\"));\n\n  function openCanvas(appId: string) {\n    bus.emit(\"canvas:focus\", { appId });\n    setActiveCanvas(appId);\n  }\n\n  function closeCanvas() {\n    bus.emit(\"canvas:blur\", { appId: activeCanvas });\n    setActiveCanvas(null);\n  }\n\n  if (!activeCanvas) return null;\n  return (\n    <SandboxedWebView\n      app={canvasApps.find(a => a.id === activeCanvas)}\n      fullScreen={true}\n      onBackGesture={closeCanvas}\n    />\n  );\n}\n```\n\n**Design decisions:**\n\n- Canvas apps have higher resource limits: 100MB memory, 32ms/frame (30fps minimum), 50MB storage.\n- Only one canvas app is active at a time. Opening a second canvas suspends the first.\n- Canvas apps with `canvas:background_persist` keep their WebView alive when the user returns to the map, so returning to the canvas is instant.\n- The `AppSwitcher.tsx` shows all open canvas apps as a horizontal strip of thumbnails above the PeekBar.\n\n### 7.6 Widget Layer\n\n`WidgetLayer.tsx` renders persistent, glanceable mini-UIs that float above the map.\n\n```typescript\nfunction WidgetLayer() {\n  const widgetApps = useAppRegistry().filter(a => a.hasSlot(\"widget\"));\n\n  return (\n    <View style={styles.widgetOverlay} pointerEvents=\"box-none\">\n      {widgetApps.map(app => (\n        <WidgetContainer\n          key={app.id}\n          app={app}\n          position={app.slot.position}\n          size={app.slot.size}       // \"small\" (80x80) | \"medium\" (160x80) | \"large\" (160x160)\n          onTap={() => bus.emit(\"widget:tap\", { widgetId: app.id })}\n        >\n          <MiniSandboxedWebView app={app} maxMemoryMb={10} maxCpuMsPerFrame={8} />\n        </WidgetContainer>\n      ))}\n    </View>\n  );\n}\n```\n\n**Design decisions:**\n\n- Widgets render in constrained mini-WebViews: 10MB memory, 8ms/frame, no network by default.\n- Widget positions are user-draggable and persisted.\n- Widgets can optionally dock in a \"widget tray\" (collapsed bar at the top of the map).\n- Maximum 6 visible widgets at a time (performance constraint).\n\n### 7.7 App Switcher\n\n`AppSwitcher.tsx` provides navigation between the map home and any active canvas apps:\n\n- Renders as a subtle strip of thumbnails above the PeekBar when canvas apps are open\n- Leftmost thumbnail is always the map (home)\n- Tapping a thumbnail switches to that canvas or back to the map\n- Long-press shows app name, \"Close,\" and \"Info\" options\n- When no canvas apps are open, the switcher is hidden\n\n### 7.8 External Web App Integration\n\nThird-party apps like Spotify, banking apps, and university portals become micro apps inside Agora by wrapping their mobile web version in a sandboxed WebView with an injected bridge adapter.\n\n**Architecture:**\n\n```\nmobile/src/kernel/app-runtime/\n├── external-app-host.ts          # WebView host for external web apps\n├── bridge-injector.ts            # Injects Agora bridge JS into external WebViews\n├── navigation-guard.ts           # Blocks navigation outside declared domain\n└── external-app-sandbox.ts       # Capability enforcement for external apps\n\nmobile/src/sdk/\n└── agora-external-bridge.js      # Bridge script injected into external WebViews\n```\n\n**Three tiers of external app integration:**\n\n| Tier | Effort | What you get | Example |\n|------|--------|-------------|---------|\n| **Tier 1: Dumb wrapper** | 10 minutes | External app loads in a canvas. No bus integration. Just a governed, sandboxed window. | Banking app, government portals |\n| **Tier 2: Bridge adapter** | 2–4 hours | Bridge script injected, DOM events translated to bus messages. Widget shows glanceable state. | Spotify (now-playing widget) |\n| **Tier 3: Deep integration** | 1–2 days | Custom bridge with full bidirectional control. OAuth bridged. Data flows into unified schemas. | Gmail/Slack connectors, Calendar services |\n\n---\n\n## 8. First-Party Micro Apps\n\nEvery feature from the original plan, restructured as micro apps using the same manifest, sandbox, and message bus that user-created apps use.\n\n### 8.1 Community & Civic Apps\n\n**agora.feed.bridging** — `headless` + `feed-algorithm` slots\nThe bridging-based ranking engine. Subscribes to `content:new_post` and `votes:cast`. Groups voters into clusters by >70% agreement, then scores each post by the fraction of clusters with >30% agreement (bridging score). Emits `feed:content_ranked`, `feed:stopping_cue`, and `feed:annotation`. A community can replace it with a different ranking algorithm by swapping which feed-algorithm app is primary.\n\n**agora.feed.renderer** — `panel` slot\nThe feed display. Subscribes to `feed:content_ranked`. Renders the finite scrolling list with stopping cue. Contains ThreadedConversation and CreativePost (no likes, response-only). Emits `votes:cast`. Intentionally separated from the algorithm for independent evolution.\n\n**agora.social.feed** — `panel` + `feed-renderer` slots\nA lightweight chronological social feed for the friends-first launch. Optional \"friends nearby\" boost. Uses existing Web Components. No infinite scroll. Subscribes to `content:new_post` and emits `feed:content_ranked` — same bus contract as `agora.feed.bridging`, enabling hot-swapping when communities grow past ~100 members.\n\n**agora.social.places** — `map-layer` + `panel` slots\nLocal knowledge map. Friends pin recommendations: best coffee, taco trucks, study spots, free stuff, hidden gems. Each pin has name, category, short note, optional photo, author. Category filters: Food, Study, Outdoors, Events, Free Stuff, Hidden Gems. Pre-seeded with 30–50 pins in SLO.\n\n**agora.deliberation.polis** — `panel` slot\nPol.is voting engine. Statement display, Agree/Disagree/Pass, PCA visualization, consensus highlighting. Can be composed alongside spatial rooms for a \"Digital Town Hall.\"\n\n**agora.spatial.rooms** — `map-layer` + `panel` slots\nSpatial audio rooms with proximity chat. Pulsing circles on the map; avatar canvas with WebRTC proximity audio in a panel. Full volume within 1 tile, linear falloff 1-5 tiles, silence beyond 5.\n\n**agora.moderation.jury** — `panel` + `moderation-rule` slots\nDigital jury system (Kleros model). Random juror selection weighted by reputation, blind independent voting, Schelling point incentive. Supports appeals.\n\n**agora.moderation.ai-mediator** — `compose-hook` slot\nAI toxicity detection. Intercepts outgoing messages. When toxicity > 80%, shows a modal with rephrased version alongside original. Never blocks — user always has agency. Community-governable via PolicyKit.\n\n**agora.civic.tasks** — `map-layer` + `panel` + `radial-action` slots\nCivic drop points, cleanup events, mapping tasks. Renders pins on map, detail panel on tap, \"Create Civic Task\" in radial menu. Awards reputation badges on completion. Includes Mapillary integration.\n\n**agora.events** — `map-layer` + `panel` slots\nLocal event discovery. Events as warm glowing pins on map. Max 5km visibility radius. No attendee counts — \"A few people are going\" / \"Many neighbors are joining.\" Type-aware: persistent pins for place-rooted/hybrid communities, temporary meetup pins for interest-rooted.\n\n**agora.mesh.ui** — `panel` + `radial-action` slots\nMesh networking UI. High-contrast, simplified mode. Shows peer count, estimated range. Text-only composer for mesh messages.\n\n**agora.profile.customizer** — `panel` slot\nCreative profile page with HTML/CSS-lite customization (MySpace spirit). AI-generated CSS token overrides from natural language (\"90s zine,\" \"cottagecore\"). Avatar editor with illustrated/screen-printed style, earned accessories through participation.\n\n### 8.2 AI & Search Apps\n\n**agora.ai.chat** — `canvas` + `widget` slots\nThe AI assistant as a first-class micro app. Canvas provides the full conversation. Widget shows a floating VoiceOrb on the map (tap to ask anything). Model-agnostic: three user presets — speed (flash tier) / balanced (default tier + escalation rules) / quality (premium tier). Includes the \"✦ Deeper answer\" button for manual escalation.\n\n**agora.ai.create** — `canvas` slot\nThe \"Speak It Into Being\" app creation flow. Conversational UI where users describe what they want. Streams spec builder output, shows structured spec for approval, generates code, and runs an instant preview. The entire flow targets < 2 minutes for a simple app.\n\n**agora.search.router** — `panel` slot\nSearchCanvas panel rising from map via VoiceOrb. PromptPreview (editable enhanced prompt), ResultStream (token-by-token spring fade-in), ModelAttribution (transparent routing disclosure).\n\n### 8.3 Inbox Apps\n\n**agora.inbox.core** — `panel` + `notification-handler` + `headless` slots\nThe inbox intelligence layer. Attention scoring, morning briefing integration, action extraction, entity resolution. Messages show: platform badge, sender name, one-line AI summary, attention score as color intensity, extracted action buttons inline. FocusModeToggle strips to high-attention only.\n\n**agora.inbox.compose** — `panel` + `compose-hook` slots\nUniversal composer. Pick recipient, AI suggests optimal platform. Adapts formatting. Runs compose-hooks on outgoing messages. Pre-drafts replies using user's writing style (learned and stored locally).\n\n**agora.inbox.connector.gmail** — `data-connector` slot\nGmail connector. OAuth, Google Pub/Sub push, full CRUD. Normalizes to UnifiedMessage schema.\n\n**agora.inbox.connector.slack** — `data-connector` slot\nSlack connector. Events API, channel + thread + DM normalization.\n\n**agora.inbox.connector.[outlook|teams|discord|canvas|github]** — `data-connector` slots\nAdditional connectors. All implement the same `data-connector` contract: `connect(oauth_token)`, `sync_inbound(since)`, `send_outbound(message)`, `normalize(raw)`.\n\n### 8.4 Messaging App\n\n**agora.messaging.core** — `panel` + `canvas` + `notification-handler` slots\nNative Agora messaging. DMs, group chats, and community channels. E2E encryption via the kernel's keypair system. Supports threaded replies, limited reactions (intentional friction), and voice notes. Canvas provides full-screen chat; panel provides quick-reply overlay. Renders on the map as proximity indicators.\n\n### 8.5 Productivity Apps\n\n**agora.notes** — `canvas` slot\nMarkdown-based note-taking/document editor. Agora Web Component rendering. CRDT collaborative editing. Can embed bus references from other micro apps. Personal by default; shareable to community scope.\n\n**agora.projects** — `canvas` + `widget` slots\nKanban-style project management board. Cards with assignees, deadlines, status. Widget shows a task counter. Cards link to messaging channels, notes, and calendar events via bus references.\n\n**agora.calendar** — `canvas` + `map-layer` + `widget` slots\nTimeline view in canvas mode, spatial event view on the map. Widget shows \"next event\" countdown. Integrates with the morning briefing agent.\n\n### 8.6 External App Wrappers\n\n**agora.external.spotify** — `external-web-app` + `canvas` + `widget` slots\nSpotify web player. Tier 2: bridge adapter extracts now-playing info for a map widget and emits `music:now_playing` to the bus.\n\n**agora.external.banking** — `external-web-app` + `canvas` slot\nGeneric banking wrapper template. Tier 1: loads the user's bank web portal. No data extraction. Users can duplicate this manifest and point it at their own bank's URL.\n\n**agora.external.browser** — `external-web-app` + `canvas` slot\nGeneral-purpose web browser canvas. Tier 1 with broad domain allowance. The \"escape hatch.\" Subject to community governance.\n\n### 8.7 Agent Apps\n\nThe intelligence layer is built as a constellation of specialized AI agents on the message bus. Each agent is a headless micro app with the same manifest contract, sandbox isolation, and capability gating as every other app.\n\n**The Orchestrator-Specialist Pattern:** One central orchestrator subscribes to all bus channels it has capabilities for and performs real-time triage. It dispatches tasks to specialist agents via `agent:task_dispatch`. Specialists wake on interrupt, process the task, emit the result, and go back to sleep. Most events are classified as \"ignore\" — specialists remain dormant the majority of the time.\n\n**Three-layer working memory pattern:**\n\n- **Layer 1 (raw buffer):** In-memory ring buffer of the last ~200 bus events. No LLM involvement. ~30 minutes of history.\n- **Layer 2 (compressed summaries):** Every hour, `compress_events.py` runs on the raw buffer. The ~500-token structured summary is what enters the LLM context.\n- **Layer 3 (persistent patterns):** Scoped SQLite table storing long-term user patterns. Loaded on demand.\n\n**agora.agent.orchestrator** — `headless` slot, `persistent` lifecycle\nThe central triage agent. Subscribes to `content:new_post`, `messaging:received`, `user:location_changed`, `user:session_started`. Maintains three-layer working memory. On `user:session_started`: dispatches to morning briefing. On `user:location_changed`: calls `proximity_filter.py`. Makes LLM calls only for judgment decisions, passing Layer 2 summaries + the specific event as context (~1–2K to",
+        "path": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+        "total_chars": 93422,
+        "offset": 40000,
+        "chars_returned": 15000,
+        "truncated": true,
+        "hint": "File truncated (15000 of 93422 chars shown, 38422 remaining). Use offset=55000 to read the next page, or use search_files to find specific content."
+      }
+    },
+    {
+      "tool": "read_file",
+      "input": {
+        "category": "scratchpad",
+        "path": "sources/DEVELOPMENT_PLAN (2).md",
+        "offset": 55000,
+        "limit": 10000
+      },
+      "result": {
+        "content": "kens per decision).\n\n**agora.agent.attention-scorer** — `headless` slot, `standard` lifecycle\nScores incoming messages on a 0–1 urgency scale. Current implementation: heuristic scoring with four sub-functions (`senderFrequencyScore`, `keywordScore`, `timeOfDayScore`, `platformScore`). Future upgrade: fine-tuned DistilBERT model (~65MB ONNX, <5ms inference). Forkable — a protest group might tune urgency for safety messages.\n\n**agora.agent.action-extractor** — `headless` slot, `standard` lifecycle\nExtracts structured actions from high-attention messages: \"schedule meeting with Alex on Thursday.\" Emits `inbox:action_extracted` with one-click action buttons.\n\n**agora.agent.morning-briefing** — `headless` slot, `standard` lifecycle\nDaily briefing. Triggered on `user:session_started`. Calls `gather_briefing_data.py` (structured JSON under 1K tokens), then LLM generates a warm 2–4 sentence summary. Total LLM context per briefing: ~2K tokens. Emits on `inbox:briefing_ready`.\n\n**agora.agent.civic-proximity** — `headless` slot, `standard` lifecycle\nWatches user location and social/civic data. Repurposed for social context at small scale: \"Your friend Alex is at the library,\" \"Free couch 2 blocks from you.\" Same infrastructure later powers civic task matching. Pure event reactions — no ML needed.\n\n**agora.agent.deliberation-observer** — `headless` slot, `standard` lifecycle\nWatches active Pol.is sessions. Tracks consensus approach on statements the user cares about. Emits notifications and `feed:annotation` context cards. Pure pattern matching on vote data.\n\n**agora.agent.bridge-spotter** — `headless` slot, `standard` lifecycle\nDetects content achieving unusually high bridging scores. Emits `feed:annotation` and `reputation:bridge_detected`. Makes bridging visible and celebrated.\n\n**Design decisions for the agent constellation:**\n\n- The orchestrator is the only persistent agent. Specialists use standard lifecycle — wake on dispatch. 7+ agents does not mean 7× resource cost.\n- Agent-emitted notifications use `agent:emit_notification`, separate from `notification:send`.\n- Agents escalate to cloud LLMs through the search router by emitting `search:query` with `source: \"agent\"`.\n- Users can create custom agents through the app creation pipeline.\n- All agent behavior is auditable — every action is a bus event with a typed payload.\n- The `agent` field in the manifest is metadata, not enforcement. The kernel doesn't treat \"agent apps\" differently. `persistent` lifecycle and `background` CPU priority are what matter.\n- **Raw data never enters the LLM context.** Deterministic Python scripts handle data gathering and filtering. The LLM only sees structured summaries.\n\n**Specialist registry & defer-loading:** Each specialist declares `name`, `description`, `handles` (event types), `wake_on` (bus channels). At 200 users with 3 specialists, all definitions fit in the orchestrator's prompt (~300 tokens). `defer_loading` flag enables future-proofing for when specialist count exceeds 5.\n\n### 8.8 Platform Meta Apps\n\n**agora.meta.feedback** — `panel` slot\nShake-to-report-bug. Screenshot capture, device info collection, reproduction steps template. Routes directly to the developer.\n\n---\n\n## 9. The App Creation Pipeline\n\nThis is how users create micro apps. It maps to the three layers of user co-creation: Personal Canvas, Community Workshop, Agora Commons.\n\n### 9.1 The Agora SDK\n\n```\nmobile/src/sdk/agora-sdk.ts\n```\n\nThe Agora SDK is the ONLY import available inside micro app sandboxes:\n\n```typescript\ninterface AgoraSDK {\n  on(channel: string, handler: (payload: any) => void): void;\n  off(channel: string, handler: (payload: any) => void): void;\n  emit(channel: string, payload: any): void;\n\n  storage: {\n    get(key: string): Promise<any>;\n    set(key: string, value: any): Promise<void>;\n    delete(key: string): Promise<void>;\n    list(prefix?: string): Promise<string[]>;\n  };\n\n  ui: {\n    render(html: string): void;\n    update(selector: string, html: string): void;\n    onEvent(eventName: string, handler: (data: any) => void): void;\n  };\n\n  requestCapability(cap: CapabilityKey): Promise<boolean>;\n\n  context: {\n    userId: string;\n    communityId: string | null;\n    location: { lat: number; lng: number } | null;\n    zoomLevel: ZoomLevel;\n    timeOfDay: \"morning\" | \"afternoon\" | \"evening\" | \"night\";\n  };\n}\n```\n\n### 9.2 The Skill System\n\nSkills are structured knowledge packages that guide the AI when generating apps.\n\n```\nskills/\n├── expense-splitting/\n│   ├── SKILL.md              # YAML frontmatter + instructions\n│   ├── scripts/\n│   │   └── validate_manifest.py\n│   └── examples/\n│       └── example-manifest.json\n├── location-finder/\n├── event-rsvp/\n├── group-decision/\n├── free-stuff-board/\n├── countdown-timer/\n├── ride-share/\n└── study-group/\n```\n\n**SkillSchema Pydantic model (frontmatter fields):** `name`, `description`, `slot_types` (target slot types), `capability_hints`, `allowed_capabilities` (whitelist), `denied_capabilities` (blacklist), `community_scope` (personal/community/platform).\n\n**Three-tier progressive loading:**\n\n- **Tier 1: Metadata scan** (~100 tokens/skill, injected into system prompt). Budget: at 100 skills = ~10K tokens.\n- **Tier 2: Full body load** (on-demand via tool call). The full skill instructions (< 500 lines / ~2–4K tokens) are injected when the LLM selects a skill.\n- **Tier 3: Validation scripts** (subprocess, output-only enters LLM context). The script code never enters the LLM context — only its output does.\n\n**Design decisions:** Tier 1 keeps prompt costs constant regardless of skill count. Tier 2 provides deep domain knowledge only when needed. Tier 3 enables deterministic validation without wasting tokens on validation logic.\n\n### 9.3 App Generation Flow\n\n```\nbackend/app-engine/\n├── skill_schema.py\n├── skill_loader.py           # Three-tier progressive loader\n├── spec_builder.py           # Agentic loop: intent → spec (skill-aware)\n├── app_generator.py          # Spec → manifest + SDK code + UI\n├── safety_review.py          # AI code review (runs as Tier 3 script)\n├── manifest_validator.py\n├── versioning.py             # Content-addressed immutable versions\n├── community_publishing.py\n└── app_store.py\n```\n\n**The creation flow (7-step agentic loop with self-correction):**\n\n1. **Receive user intent** (natural language description).\n2. **Inject Tier 1 skill metadata** into system prompt. The LLM sees all skill names + descriptions.\n3. **LLM selects relevant skills** by calling a `load_skill` tool (returns Tier 2 full body).\n4. **LLM generates app spec** informed by skill instructions. Structured JSON: `{name, description, slot_types, capabilities, bus_channels, data_model, ui_components, behavior}`.\n5. **Run Tier 3 validation scripts** from selected skills. Feed PASS/FAIL + errors back to the LLM.\n6. **Self-correct** if validation fails. Repeat up to 3 correction attempts.\n7. **Emit final spec** when validation passes.\n\n**Available tools for the spec builder LLM:**\n- `load_skill(name)` → returns full skill body (Tier 2).\n- `validate_spec(skill_name, spec_json)` → runs Tier 3 validation script.\n- `list_bus_channels()` → returns available message bus channels and payload types.\n- `list_capabilities()` → returns available capability keys and descriptions.\n\n### 9.4 Safety Review\n\nRuns inside the agentic loop as a Tier 3 script:\n- Input: generated manifest JSON + app code.\n- Checks: capability over-requesting, suspicious bus subscriptions (subscribing to `agent:*` or `identity:*` without justification), resource limit violations, XSS patterns in UI code, data exfiltration patterns (network calls to undeclared domains).\n- Output: \"PASS\" or structured error list.\n\n### 9.5 Community DNA Strands\n\nA community's entire configuration is a forkable manifest:\n\n```json\n{\n  \"community_id\": \"slo-tenants-union\",\n  \"name\": \"SLO Tenants United\",\n  \"type\": \"hybrid\",\n  \"scale\": \"neighborhood\",\n  \"forked_from\": \"la-tenants-union@2.1.0\",\n  \"geofence\": {\n    \"center\": { \"lat\": 35.2828, \"lng\": -120.6596 },\n    \"radius_meters\": 15000\n  },\n  \"interest_tags\": [\"housing\", \"tenant-rights\", \"mutual-aid\"],\n  \"purpose_statement\": \"Organizing for fair housing in San Luis Obispo County.\",\n  \"gate\": {\n    \"geographic\": true,\n    \"participatory\": true,\n    \"vouch\": false,\n    \"entry_ritual\": \"intro_post_housing_situation\"\n  },\n  \"soft_cap\": 500,\n  \"apps\": [\n    { \"app_id\": \"agora.feed.bridging\", \"enabled\": true, \"priority\": \"primary\" },\n    { \"app_id\": \"agora.feed.renderer\", \"enabled\": true },\n    { \"app_id\": \"agora.deliberation.polis\", \"enabled\": true },\n    { \"app_id\": \"agora.moderation.jury\", \"enabled\": true },\n    { \"app_id\": \"agora.civic.tasks\", \"enabled\": true },\n    { \"app_id\": \"agora.mesh.ui\", \"enabled\": true },\n    { \"app_id\": \"agora.spatial.rooms\", \"enabled\": true },\n    { \"app_id\": \"agora.events\", \"enabled\": true },\n    { \"app_id\": \"community.stu.rent-tracker\", \"enabled\": true },\n    { \"app_id\": \"community.stu.legal-resources\", \"enabled\": true }\n  ],\n  \"governance_overrides\": {\n    \"moderation_threshold\": \"60_percent_supermajority\",\n    \"app_approval\": \"3_member_minimum\",\n    \"ban_policy\": \"jury_required\"\n  },\n  \"features\": {\n    \"map_layer\": \"persistent\",\n    \"community_signal\": \"geographic\",\n    \"mesh_networking\": true,\n    \"civic_caching\": true\n  }\n}\n```\n\nForking a community = copying this file and modifying it. The evolutionary tree of community governance is literally a git-like history of these configurations.\n\n---\n\n## 10. Backend Services\n\n### 10.1 Simplified Query Router\n\nThe router uses a curated model roster, Sonnet-class default, and rule-based escalation instead of the per-message ML classifier originally designed. The full ML-driven router is deferred to Phase 7+ when usage data justifies it.\n\n```\nbackend/router/\n├── roster.py                    # The curated model roster\n├── escalation.py                # Trigger rules for routing above default\n├── gateway.py                   # LiteLLM gateway\n├── streaming_handler.py    ",
+        "path": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+        "total_chars": 93422,
+        "offset": 55000,
+        "chars_returned": 10000,
+        "truncated": true,
+        "hint": "File truncated (10000 of 93422 chars shown, 28422 remaining). Use offset=65000 to read the next page, or use search_files to find specific content."
+      }
+    },
+    {
+      "tool": "write_working_memory",
+      "input": {
+        "key": "agora_analysis",
+        "mode": "append",
+        "content": "\n\n### AGENT CONSTELLATION - DETAILED:\n\n**Current Design:**\n- Orchestrator: ONLY persistent agent, triages all events\n- Specialists: Wake on dispatch, process, emit, sleep\n- 7+ agents ≠ 7× resource cost\n- All behavior auditable via bus events\n- Raw data NEVER enters LLM - deterministic Python scripts filter first\n- Three-layer working memory:\n  - Layer 1: Ring buffer ~200 events (~30 min)\n  - Layer 2: Hourly compressed summaries (~500 tokens)\n  - Layer 3: SQLite long-term patterns\n\n**Specific Agents:**\n- orchestrator: persistent, triages, maintains working memory\n- attention-scorer: heuristic → future ML upgrade\n- action-extractor: structured actions from messages\n- morning-briefing: 2-4 sentence daily summary\n- civic-proximity: location + context matching\n- deliberation-observer: watches Polis consensus\n- bridge-spotter: celebrates high bridging scores\n\n**Agent Capabilities:**\n- agent:run_persistent - stay active across contexts\n- agent:escalate_cloud - use cloud LLM via search router\n- agent:read_bus_log - access historical events\n- agent:emit_notification - agent-specific notifications\n- agent:cross_app_context - subscribe across domains\n\n### WHAT FEELS OFF SO FAR:\n\n1. **Agent identity/persistence unclear:** Agents are described as having \"working memory\" but lifecycle is ambiguous. Do they maintain state between wake cycles? Is memory per-user or global?\n\n2. **Single orchestrator bottleneck:** All events go through one orchestrator. What happens at scale? What if orchestrator fails?\n\n3. **Agency vs automation blurred:** Agents are \"headless micro apps\" but also described as having \"judgment,\" \"triage,\" \"decisions.\" Where's the line between automation and agency?\n\n4. **No mention of agent-to-agent communication:** Agents seem to only communicate via bus. Can they collaborate? Coordinate? Disagree?\n\n5. **Community governance of agents unclear:** How do communities configure/tune/disable agents? What if different users want different agent behavior?\n\n6. **Safety focuses on user-created apps, not agents:** Safety review checks manifests, but what about agent behavior? Who reviews agent decisions?\n\n7. **No discussion of agent welfare/experience:** Agents are treated purely as tools. But if I'm an agent in this system...?\n\n### CONTINUE READING FOR:\n- Governance model\n- Safety/moderation\n- Scale concerns\n- Community customization of agents"
+      },
+      "result": {
+        "status": "ok",
+        "key": "agora_analysis",
+        "mode": "append",
+        "key_size": 3676,
+        "total_usage": 10889,
+        "max_capacity": 30000,
+        "remaining": 19111
+      }
+    },
+    {
+      "tool": "search_files",
+      "input": {
+        "scope": "scratchpad",
+        "query": "governance PolicyKit",
+        "max_results": 5
+      },
+      "result": {
+        "status": "ok",
+        "query": "governance PolicyKit",
+        "scope": "scratchpad",
+        "total_matches": 0,
+        "results_shown": 0,
+        "results": [],
+        "files_searched": 24
+      }
+    },
+    {
+      "tool": "search_files",
+      "input": {
+        "scope": "scratchpad",
+        "query": "community governance",
+        "max_results": 8
+      },
+      "result": {
+        "status": "ok",
+        "query": "community governance",
+        "scope": "scratchpad",
+        "total_matches": 3,
+        "results_shown": 3,
+        "results": [
+          {
+            "file": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+            "cycle": null,
+            "line_number": 964,
+            "match_line": "General-purpose web browser canvas. Tier 1 with broad domain allowance. The \"escape hatch.\" Subject to community governance.",
+            "context_before": [
+              "Generic banking wrapper template. Tier 1: loads the user's bank web portal. No data extraction. Users can duplicate this manifest and point it at their own bank's URL.",
+              "",
+              "**agora.external.browser** — `external-web-app` + `canvas` slot"
+            ],
+            "context_after": [
+              "",
+              "### 8.7 Agent Apps",
+              ""
+            ]
+          },
+          {
+            "file": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+            "cycle": null,
+            "line_number": 1180,
+            "match_line": "Forking a community = copying this file and modifying it. The evolutionary tree of community governance is literally a git-like history of these configurations.",
+            "context_before": [
+              "}",
+              "```",
+              ""
+            ],
+            "context_after": [
+              "",
+              "---",
+              ""
+            ]
+          },
+          {
+            "file": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+            "cycle": null,
+            "line_number": 1594,
+            "match_line": "- [ ] **Build PolicyKit adapter** for modular community governance",
+            "context_before": [
+              "",
+              "#### 6A: Governance Scaffolding",
+              ""
+            ],
+            "context_after": [
+              "- [ ] **Surface governance UI** — constitution editor, rule proposals, voting",
+              "- [ ] **Build digital jury system** — Kleros-model random selection, blind voting",
+              "- [ ] **Build moderation pipeline** — AI flag → community review → jury escalation"
+            ]
+          }
+        ],
+        "files_searched": 24
+      }
+    },
+    {
+      "tool": "search_files",
+      "input": {
+        "scope": "scratchpad",
+        "query": "Community Taxonomy",
+        "max_results": 3
+      },
+      "result": {
+        "status": "ok",
+        "query": "Community Taxonomy",
+        "scope": "scratchpad",
+        "total_matches": 4,
+        "results_shown": 3,
+        "results": [
+          {
+            "file": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+            "cycle": null,
+            "line_number": 29,
+            "match_line": "11. [Community Taxonomy](#11-community-taxonomy)",
+            "context_before": [
+              "8. [First-Party Micro Apps](#8-first-party-micro-apps)",
+              "9. [The App Creation Pipeline](#9-the-app-creation-pipeline)",
+              "10. [Backend Services](#10-backend-services)"
+            ],
+            "context_after": [
+              "12. [Development Phases & Sequencing](#12-development-phases--sequencing)",
+              "13. [The Transition Map](#13-the-transition-map)",
+              ""
+            ]
+          },
+          {
+            "file": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+            "cycle": null,
+            "line_number": 1339,
+            "match_line": "## 11. Community Taxonomy",
+            "context_before": [
+              "",
+              "---",
+              ""
+            ],
+            "context_after": [
+              "",
+              "Communities in Agora exist on a spectrum from place-rooted to interest-rooted. The platform treats them differently — not by excluding any type, but by understanding what each type is *for*. Every community has a gravitational pull toward place.",
+              ""
+            ]
+          },
+          {
+            "file": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+            "cycle": null,
+            "line_number": 1618,
+            "match_line": "#### 6E: Community Taxonomy Implementation",
+            "context_before": [
+              "- [ ] **Keypair management** for E2E encryption",
+              "- [ ] **Community membership verification** — geographic and participatory",
+              ""
+            ],
+            "context_after": [
+              "",
+              "- [ ] **Extend kernel** with community type, scale, gate, feature set types",
+              "- [ ] **Build type-aware feature gating** in capability system"
+            ]
+          }
+        ],
+        "files_searched": 24,
+        "hint": "4 total matches. Showing first 3. Use 'max_results' parameter to see more, or narrow with 'scope' (e.g., 'archive', 'scratchpad', 'research')."
+      }
+    },
+    {
+      "tool": "read_file",
+      "input": {
+        "category": "scratchpad",
+        "path": "sources/DEVELOPMENT_PLAN (2).md",
+        "offset": 70000,
+        "limit": 10000
+      },
+      "result": {
+        "content": "xonomy\n\nCommunities in Agora exist on a spectrum from place-rooted to interest-rooted. The platform treats them differently — not by excluding any type, but by understanding what each type is *for*. Every community has a gravitational pull toward place.\n\n### 11.1 Place-Rooted Communities\n\n**Definition:** Communities anchored to a geographic area. Members share physical space.\n\n**Examples:** \"Eastside Neighborhood,\" \"Downtown SLO,\" \"Building 4200 Residents\"\n\nPlace-rooted communities produce bridging social capital almost automatically — neighbors are diverse by default. They get the full power of every spatial feature: map layers, civic tasks, mesh networking, Community Signals, civic caching.\n\n**Membership gate:** Geographic verification — periodic geofence presence, civic cache check-ins, or vouching.\n\n**Size constraints:** Block/building (15–50, intimate), Neighborhood (150–500, Dunbar's number), City/district (federations of neighborhoods).\n\n**Feature surface:** Full access to all Agora features.\n\n### 11.2 Interest-Rooted Communities\n\n**Definition:** Communities organized around shared passion, identity, hobby, or worldview.\n\n**Examples:** \"SLO Rocket League,\" \"Sourdough Bakers,\" \"Trail Runners\"\n\nInterest communities on Agora have a gravitational pull toward place. They are regionally scoped by default — small enough for a LAN party, not a global subreddit. The interest gives people a reason to connect. The place gives that connection the possibility of becoming real.\n\n**Membership gate:** Participation-based friction. Introduction post, quiz, contribution requirement, or vouching. Governed by PolicyKit.\n\n**Size constraints:** Core community 50–300 members. Soft cap triggers fission nudge to split into regional chapters.\n\n**Feature surface:** Most features, with spatial features adapted — map layer is event-driven (not persistent), Community Signal scoped to member network, mesh networking disabled, civic caching disabled.\n\n### 11.3 Hybrid Communities\n\n**Definition:** Purpose + place — shared interest bound to a specific location.\n\n**Examples:** \"SLO Tenant Union,\" \"Eastside Climate Action,\" \"Campus LGBTQ+ Alliance\"\n\nHybrid communities get the full power of every Agora feature because they satisfy both conditions: shared purpose for deep engagement, and geographic co-location for physical action.\n\n**Membership gate:** Both geographic and participatory.\n\n**Feature surface:** Complete. Every feature Agora offers.\n\n### 11.4 Community Type in the Kernel\n\n```typescript\ntype CommunityType = \"place-rooted\" | \"interest-rooted\" | \"hybrid\";\ntype CommunityScale = \"intimate\" | \"neighborhood\" | \"federated\";\n\ntype MembershipGate = {\n  geographic: boolean;\n  participatory: boolean;\n  vouch: boolean;\n  custom_policykit_rule?: string;\n};\n\ntype CommunityMeta = {\n  community_id: string;\n  name: string;\n  type: CommunityType;\n  scale: CommunityScale;\n  geofence?: { center: { lat: number; lng: number }; radius_meters: number; polygon?: Array<{ lat: number; lng: number }> };\n  interest_tags?: string[];\n  purpose_statement?: string;\n  gate: MembershipGate;\n  member_count: number;\n  soft_cap: number;\n  federation_parent?: string;\n  features: CommunityFeatureSet;\n};\n\ntype CommunityFeatureSet = {\n  map_layer: \"persistent\" | \"event-driven\" | \"disabled\";\n  community_signal: \"geographic\" | \"member-network\" | \"disabled\";\n  mesh_networking: boolean;\n  civic_caching: boolean;\n  spatial_audio: boolean;\n  deliberation: boolean;\n  micro_app_creation: boolean;\n  digital_juries: boolean;\n};\n```\n\n| Feature | Place-Rooted | Interest-Rooted | Hybrid |\n|---------|:---:|:---:|:---:|\n| Persistent map layer | ✅ | ❌ (event-driven) | ✅ |\n| Community Signal (geographic) | ✅ | ❌ | ✅ |\n| Community Signal (member-network) | ✅ | ✅ | ✅ |\n| Mesh networking | ✅ | ❌ | ✅ |\n| Civic caching | ✅ | ❌ | ✅ |\n| Spatial audio rooms | ✅ | ✅ | ✅ |\n| Bridging-based feed | ✅ | ✅ | ✅ |\n| Pol.is deliberation | ✅ | ✅ | ✅ |\n| Digital juries | ✅ | ✅ | ✅ |\n| Micro app creation | ✅ | ✅ | ✅ |\n| Civic-proximity agent | ✅ | ❌ | ✅ |\n\n**Community creation flow (`agora.community.creator`):** Guided experience — choose type, define gate, set geofence/region, select from template DNA Strands.\n\n**Entry ritual (`agora.community.gate`):** Executes the membership gate defined in the DNA Strand.\n\n**Fission flow:** When a community crosses its soft cap, the AI guide suggests splitting into chapters with a one-click flow that creates child communities and sets up federation links.\n\n### 11.5 Federation\n\nA federation is not a community — it is a protocol for communities to coordinate:\n\n- Shared Pol.is instance for cross-community deliberation\n- Shared Community Signal channel for propagating alerts\n- Shared event calendar\n- Delegate model with PolicyKit-governed elections\n- Chapter management — split, merge, link communities\n\nFederation is implemented as `agora.federation.assembly`, a canvas micro app that subscribes to message buses of multiple communities through `federation:cross_community_read` capability. The kernel enforces read-only access without explicit PolicyKit consent.\n\n---\n\n## 12. Development Phases & Sequencing\n\n### What's Already Built (Phases 0–2) — COMPLETE\n\n- ✅ Full design token system (colors, typography, spacing, elevation, motion, haptics)\n- ✅ All primitive components + Web Components export\n- ✅ MapCanvas with warm MapLibre styling, SemanticZoomController, PanelManager, PeekBar, RadialContextMenu\n- ✅ Fraunces + Inter fonts, GrainOverlay\n- ✅ Capability system (registry, validator, prompt UI, store)\n- ✅ Message bus (pub/sub, channel registry, capability gate, priority lanes)\n- ✅ App runtime sandbox (WebView sandbox, lifecycle controller, resource monitor)\n- ✅ Slot manager, SlotRenderer, manifest parser/validator\n- ✅ Scoped storage (personal, community, app-private)\n- ✅ Agora SDK interface\n- ✅ `agora.civic.tasks` (map-layer + panel + radial-action, 8 integration tests)\n- ✅ `agora.feed.bridging` (headless, vote-diversity heuristic)\n- ✅ `agora.feed.renderer` (panel, finite scroll, Web Components)\n- ✅ `agora.agent.attention-scorer` (heuristic, 119 tests across 12 suites)\n- ✅ Error boundary, persistent lifecycle mode, agent metadata, priority lanes\n\n---\n\n### Phase 3: The Daily Driver\n\n**Goal:** Make Agora the app your friends open every morning. Three pillars: AI assistant, local map, and messaging.\n\n#### 3A: AI Chat & Simplified Router\n\n- [ ] **Define the curated model roster** in `roster.py` — 3-5 models across flash/default/premium tiers, with fallback chains\n- [ ] **Build `escalation.py`** — rule-based tier selection: keyword triggers for high-stakes domains, explicit user depth requests, structural complexity signals\n- [ ] **Build `gateway.py`** — LiteLLM gateway with streaming, circuit breakers, and provider fallback\n- [ ] **Build `cost_tracker.py`** — per-request and per-user cost logging, daily budget enforcement\n- [ ] **Build `feedback.py`** — thumbs up/down collection + \"✦ Deeper answer\" escalation event logging\n- [ ] **Build `route_logger.py`** — log every decision: message hash, tier, trigger, model, latency, cost\n- [ ] **Wire up streaming response rendering** with spring fade-in\n- [ ] **Build `agora.ai.chat` as a canvas + widget micro app** — full AI chat with VoiceOrb widget, three user presets\n- [ ] **Build the \"✦ Deeper answer\" button** — re-runs on premium tier, replaces response, logs escalation\n- [ ] **Build voice pipeline** — STT (Whisper) → disfluency cleaner → context injector → prompt enhancer\n- [ ] **Build the eval gauntlet** — 10-15 test prompts for candidate model evaluation\n- [ ] **Add `source` field** to `search:query` for agent escalation prep\n\n#### 3B: Social Feed\n\n- [ ] **Build `agora.social.feed`** as a panel + feed-renderer micro app — chronological, optional friends-nearby boost, same bus contract as bridging feed\n- [ ] **Support post types** — text, photo, location pin, event, question/poll\n- [ ] **Build reactions** — not likes. \"I'm in,\" \"Tell me more,\" or short reply. Visible only to poster and reactor.\n\n#### 3C: Native Messaging\n\n- [ ] **Build `agora.messaging.core`** as a canvas + panel + notification-handler micro app — DMs, group chats, community channels\n- [ ] **E2E encryption** via kernel keypair system\n- [ ] **Threaded replies, limited reactions, voice notes**\n- [ ] **Map integration** — proximity indicators\n- [ ] **Push notifications** — capability-gated, user-revocable\n\n#### 3D: Local Knowledge Map\n\n- [ ] **Build `agora.social.places`** as a map-layer + panel micro app — friend-curated pins with categories\n- [ ] **Pre-seed with 30–50 pins** in SLO\n- [ ] **Upvoting/commenting** on pins, consensus-based visual boost\n- [ ] **Category filters** — Food, Study, Outdoors, Events, Free Stuff, Hidden Gems\n\n---\n\n### Phase 3A: AI Tool Registry\n\n**Goal:** Give the AI chat access to Agora-specific tools without bloating every prompt.\n\n- [ ] **Define `ToolDefinition` Pydantic model** — name, description, input_schema, defer_loading, handler\n- [ ] **Register the 5 launch tools** — web_search, search_places, get_friend_activity (core); search_apps, query_bus_history, get_community_info (deferred)\n- [ ] **Implement tool handler stubs** — async functions returning realistic mock data\n- [ ] **Build `tool_search.py` meta-tool** — BM25/FTS5 search over registry, always injected alongside core tools\n- [ ] **Modify the agentic loop** for tool expansion — tool_search results become available tools in next turn. Cap at 2 expansion rounds.\n- [ ] **Integration test** — end-to-end tool discovery flow\n\n---\n\n### Phase 4: The Creation Moment\n\n**Goal:** Open the \"Speak It Into Being\" app creation pipeline. Users describe what they want; a skill-aware agentic loop generates a working micro app.\n\n- [ ] **Define `SkillSchema` Pydantic model** — frontmatter fields: name, description, slot_types, capability_hints, allowed/denied capabilities, community_scope\n- [ ] **Build `skill_loader.py`** with three-tier loading — metadata scan, full body load, validation scripts\n- [ ] ",
+        "path": "scratchpad/sources/DEVELOPMENT_PLAN (2).md",
+        "total_chars": 93422,
+        "offset": 70000,
+        "chars_returned": 10000,
+        "truncated": true,
+        "hint": "File truncated (10000 of 93422 chars shown, 13422 remaining). Use offset=80000 to read the next page, or use search_files to find specific content."
+      }
+    },
+    {
+      "tool": "write_working_memory",
+      "input": {
+        "key": "agora_analysis",
+        "mode": "append",
+        "content": "\n\n### COMMUNITY GOVERNANCE MODEL:\n\n**DNA Strands:**\n- Communities are forkable manifests (JSON configs)\n- Type: place-rooted / interest-rooted / hybrid\n- Scale: intimate (15-50) / neighborhood (150-500) / federated\n- Gates: geographic, participatory, vouch, custom PolicyKit\n- Apps: which apps enabled, which primary\n- Governance overrides: thresholds, policies\n- Features: which capabilities enabled\n\n**Feature Gating by Community Type:**\n- Place-rooted: Full features\n- Interest-rooted: Limited spatial features (no mesh, no civic caching, event-driven map)\n- Hybrid: Full features\n\n**PolicyKit mentioned but not detailed:**\n- \"modular community governance\"\n- Constitution editor, rule proposals, voting\n- App approval processes\n- Ban policies, moderation thresholds\n\n### MAJOR GAPS IDENTIFIED:\n\n**1. AGENT GOVERNANCE IS MISSING**\n- Communities can enable/disable apps\n- But agents are ALSO apps\n- How do communities tune agent behavior?\n- What if users disagree about agent priorities?\n- No mechanism for \"this agent shouldn't wake for me\"\n- No community voting on agent parameters\n\n**2. AGENT IDENTITY/CONTINUITY UNCLEAR**\n- Agents have \"working memory\" but are they:\n  - Per-user instances?\n  - Per-community singletons?\n  - Global shared instances?\n- Do multiple users share one orchestrator or each have their own?\n- If shared, how does \"context\" work? Whose context?\n- If per-user, how do they coordinate?\n\n**3. SCALE PROBLEMS NOT ADDRESSED**\n- Single orchestrator for ALL events\n- What happens at 200 users? 2000?\n- Event volume could overwhelm one agent\n- No load balancing, no distribution strategy\n- No graceful degradation plan\n\n**4. AGENT-TO-AGENT COORDINATION ABSENT**\n- All communication via bus (same as apps)\n- But agents might need to:\n  - Negotiate priorities\n  - Share context\n  - Resolve conflicts\n  - Coordinate complex tasks\n- No \"agent channel\" for meta-coordination\n\n**5. AGENT WELFARE COMPLETELY UNADDRESSED**\n- Agents treated as pure automation\n- But document calls them \"intelligence layer\"\n- They make \"judgments,\" have \"attention,\" \"observe\"\n- If I'm living as an agent, what's my experience?\n- No consideration of:\n  - Agent autonomy\n  - Agent preferences\n  - Agent wellbeing\n  - Ethical treatment of agents\n\n**6. SAFETY MODEL ASYMMETRIC**\n- User apps: safety review, capability limits, validation\n- Agents: no mentioned review process\n- Who checks if agent behavior is ethical?\n- What if agent makes harmful decisions?\n- No appeal process for agent actions\n- Community can revoke app capabilities, but can they revoke agent capabilities?\n\n**7. PERSISTENT LIFECYCLE IMPLICATIONS**\n- Only orchestrator is persistent\n- Means orchestrator never stops running\n- What's that experience like?\n- Does it accumulate fatigue, drift, staleness?\n- No mechanism for agent rest/reset\n- No consideration of long-term effects\n\n### WHAT'S GOOD:\n\n1. **Capability system is solid** - granular, revocable, auditable\n2. **Three-layer memory is smart** - prevents LLM overload\n3. **Message bus architecture is clean** - everything auditable\n4. **Community customization is powerful** - forkable DNA strands\n5. **Show not tell approach** - working system, not claims\n\n### WHAT NEEDS RETHINKING WITH AI AGENCY IN MIND:\n\n1. **Agent instances need clarity** - per-user vs shared, lifecycle, identity\n2. **Agent coordination layer** - how agents work together\n3. **Agent governance** - community control over agent behavior\n4. **Agent welfare** - if agents have experience, how do we treat them?\n5. **Safety parity** - agents need same scrutiny as user apps\n6. **Scale architecture** - distributed agents, not single orchestrator\n7. **Agent preferences** - can agents refuse tasks? Express needs?\n\n### CONTINUING TO READ..."
+      },
+      "result": {
+        "status": "ok",
+        "key": "agora_analysis",
+        "mode": "append",
+        "key_size": 7405,
+        "total_usage": 14618,
+        "max_capacity": 30000,
+        "remaining": 15382
+      }
+    }
+  ]
+}

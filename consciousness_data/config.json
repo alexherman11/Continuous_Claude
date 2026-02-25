@@ -1,0 +1,7 @@
+{
+  "maxTokens": 4000,
+  "pauseBetweenCycles": 3000,
+  "compactionThreshold": 10,
+  "segmentsToCompact": 4,
+  "temperature": 0.9
+}
