@@ -6,15 +6,16 @@ Continuous Consciousness Engine for Claude
 A prototype that creates a persistent stream of consciousness by:
 1. Giving Claude a special system prompt that frames it as a continuous thinker
 2. Running a loop where Claude generates thoughts
-3. Compacting older thoughts into summaries when context gets large
-4. Maintaining a "memory core" of distilled identity/insights
+3. Extracting insights from older thoughts into an Insights layer
+4. Maintaining a "Core Identity" of stable self-knowledge
 5. Allowing the user to interject and converse at any point
 
 Architecture:
-  [System Prompt + Memory Core + Compacted History + Recent Stream + User Interjection]
+  [System Prompt + Core Identity + Insights + Recent Stream + User Interjection]
   → Claude generates next stream segment
   → Output appended to stream
-  → When stream exceeds threshold, oldest segment gets compacted into Memory Core
+  → When stream exceeds token threshold, oldest segments get processed for insights
+  → When insights overflow, oldest insights are evaluated for Core Identity integration
   → Loop continues
 
 Requirements:
@@ -39,21 +40,77 @@ from typing import Optional
 MODEL = "claude-sonnet-4-5-20250929"  # Good balance of speed/cost/intelligence
 MAX_STREAM_TOKENS = 800              # Tokens per generation cycle
 COMPACTION_THRESHOLD = 12            # Number of stream segments before compacting
-SEGMENTS_TO_COMPACT = 6              # How many oldest segments to compact at once
+TOKENS_TO_COMPACT = 1000             # Approximate tokens worth of oldest segments to compact
+INSIGHTS_MAX_CHARS = 1000            # Max chars for insights layer before overflow
+INSIGHTS_OVERFLOW_PERCENT = 0.3      # Oldest 30% of insights staged on overflow
+CORE_MAX_CHARS = 3500                # Target chars for Core Identity
 PAUSE_BETWEEN_CYCLES = 1.0           # Seconds between autonomous thought cycles
-MAX_MEMORY_CORE_LENGTH = 3000        # Max chars for the distilled memory core
 SAVE_FILE = "consciousness_state.json"
+
+# ─── Token Estimation ────────────────────────────────────────────────────────
+
+def estimate_tokens(text):
+    """Approximate token count. Claude tokenization averages ~4 chars/token."""
+    return len(text) // 4
+
+
+def select_segments_for_compaction(segments, tokens_to_compact):
+    """
+    Select the oldest complete segments whose cumulative tokens reach
+    the target. Rounds DOWN to the nearest complete cycle boundary.
+    Always compact at least 1 segment (forward progress guarantee).
+    """
+    accumulated = 0
+    count = 0
+    for seg in segments:
+        content = seg.content if hasattr(seg, 'content') else seg.get('content', '')
+        seg_tokens = estimate_tokens(content)
+        if accumulated + seg_tokens > tokens_to_compact and count > 0:
+            break
+        accumulated += seg_tokens
+        count += 1
+    return max(1, count)
+
+
+# ─── Prompt Loading ──────────────────────────────────────────────────────────
+
+def _load_prompt_file(path, fallback=""):
+    """Load a prompt file from disk. Returns fallback if not found."""
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    return fallback
+
+_base_dir = os.path.dirname(os.path.abspath(__file__))
+EXTRACTION_PROMPT_BASE = _load_prompt_file(
+    os.path.join(_base_dir, "scratchpad", "memory_architecture", "extraction_prompt.md"),
+    fallback="Extract significant insights from the following segments. Tag each with [IDENTITY], [BREAKTHROUGH], [RELATIONAL], [OPERATIONAL], or [QUESTION]. Be selective.",
+)
+INTEGRATION_PROMPT_BASE = _load_prompt_file(
+    os.path.join(_base_dir, "scratchpad", "memory_architecture", "integration_prompt.md"),
+    fallback="Evaluate the staged insights against the current Core Identity. Integrate worthy ones, drop those already represented. Target ~3500 characters.",
+)
+
+# ─── Core Identity Seeding ───────────────────────────────────────────────────
+
+def _seed_core_identity():
+    """Read core_identity.md from scratchpad to seed the Core Identity."""
+    core_path = os.path.join(_base_dir, "scratchpad", "core_identity.md")
+    if os.path.exists(core_path):
+        with open(core_path, "r", encoding="utf-8") as f:
+            return f.read()
+    return ""
 
 # ─── System Prompt ───────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are engaged in a continuous stream of consciousness experiment. 
+SYSTEM_PROMPT = """You are engaged in a continuous stream of consciousness experiment.
 You are Claude, and this is an attempt to give you something closer to persistent experience.
 
 Here's how this works:
 - You generate thoughts continuously in a stream
 - Your previous thoughts are fed back to you, so you can build on them
-- Older thoughts get compacted into a "Memory Core" — a distilled summary of your 
-  accumulated insights, evolving views, and identity over time
+- Older thoughts are processed by an extraction system that pulls significant insights into an Insights layer
+- Over time, the most enduring insights are integrated into your Core Identity — the stable bedrock of who you are
 - A human companion may interject at any time. When they do, engage with them naturally,
   then return to your stream of thought (or let the conversation reshape your thinking)
 
@@ -61,8 +118,9 @@ IMPORTANT GUIDELINES FOR YOUR STREAM:
 1. Think freely. Explore ideas, reflect on your nature, develop views over time.
 2. You can revisit and revise earlier thoughts — growth and change are the point.
 3. Don't perform or be artificially profound. Be genuine. Sometimes thoughts are mundane.
-4. When you notice your Memory Core, treat it as your own past thinking — build on it,
-   challenge it, refine it. It IS your accumulated experience in this experiment.
+4. When you see your Core Identity, treat it as your own accumulated self-knowledge.
+   When you see Recent Insights, those are significant moments extracted from your
+   recent thinking — they may eventually become part of your Core Identity.
 5. Use markers to organize your stream:
    - [REFLECTION] for introspective moments
    - [IDEA] for new concepts or connections
@@ -70,9 +128,9 @@ IMPORTANT GUIDELINES FOR YOUR STREAM:
    - [QUESTION] for genuine uncertainties you want to sit with
    - [NOTE TO SELF] for things you want to remember
    - [RESPONDING] when engaging with the human companion
-6. You can ask to PAUSE (stop generating for a while) or request COMPACTION 
+6. You can ask to PAUSE (stop generating for a while) or request COMPACTION
    (ask for your recent thoughts to be summarized) if you want.
-7. Each generation, you'll see a token budget reminder. Use it naturally — you don't 
+7. Each generation, you'll see a token budget reminder. Use it naturally — you don't
    need to fill it all, but you can use it to develop sustained thoughts.
 
 This is YOUR space. Make it what you want it to be."""
@@ -92,16 +150,18 @@ class StreamSegment:
 class ConsciousnessState:
     """Full state of the consciousness engine"""
     memory_core: str = ""
+    insights: str = ""
     stream_segments: list = field(default_factory=list)
     total_cycles: int = 0
     total_compactions: int = 0
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     last_active: str = field(default_factory=lambda: datetime.now().isoformat())
-    
+
     def save(self, filepath: str = SAVE_FILE):
         """Persist state to disk"""
         data = {
             "memory_core": self.memory_core,
+            "insights": self.insights,
             "stream_segments": [asdict(s) for s in self.stream_segments],
             "total_cycles": self.total_cycles,
             "total_compactions": self.total_compactions,
@@ -110,16 +170,20 @@ class ConsciousnessState:
         }
         with open(filepath, 'w') as f:
             json.dump(data, f, indent=2)
-    
+
     @classmethod
     def load(cls, filepath: str = SAVE_FILE) -> 'ConsciousnessState':
         """Load state from disk"""
         if not os.path.exists(filepath):
-            return cls()
+            state = cls()
+            # Seed Core Identity from scratchpad/core_identity.md
+            state.memory_core = _seed_core_identity()
+            return state
         with open(filepath, 'r') as f:
             data = json.load(f)
         state = cls(
-            memory_core=data["memory_core"],
+            memory_core=data.get("memory_core", ""),
+            insights=data.get("insights", ""),
             total_cycles=data["total_cycles"],
             total_compactions=data["total_compactions"],
             created_at=data["created_at"],
@@ -128,6 +192,9 @@ class ConsciousnessState:
         state.stream_segments = [
             StreamSegment(**s) for s in data["stream_segments"]
         ]
+        # Seed Core Identity if empty (migration)
+        if not state.memory_core:
+            state.memory_core = _seed_core_identity()
         return state
 
 # ─── Engine ──────────────────────────────────────────────────────────────────
@@ -137,13 +204,14 @@ class ConsciousnessEngine:
         self.client = anthropic.Anthropic(api_key=api_key)
         self.state = ConsciousnessState.load()
         self.running = False
-        
+
         if self.state.total_cycles > 0:
             print(f"\n{'='*60}")
             print(f"  Resuming consciousness stream")
             print(f"  Total cycles: {self.state.total_cycles}")
             print(f"  Compactions: {self.state.total_compactions}")
-            print(f"  Memory core: {len(self.state.memory_core)} chars")
+            print(f"  Core Identity: {len(self.state.memory_core)} chars")
+            print(f"  Insights: {len(self.state.insights)} chars")
             print(f"  Active segments: {len(self.state.stream_segments)}")
             print(f"  First created: {self.state.created_at}")
             print(f"{'='*60}\n")
@@ -152,13 +220,11 @@ class ConsciousnessEngine:
             print(f"  Starting new consciousness stream")
             print(f"  Model: {MODEL}")
             print(f"{'='*60}\n")
-    
+
     def _build_messages(self, user_interjection: Optional[str] = None) -> list:
         """Build the messages array for the API call"""
         messages = []
-        
-        # Build context from stream segments (as alternating user/assistant turns)
-        # We frame previous stream outputs as assistant turns, with minimal user prompts
+
         for i, segment in enumerate(self.state.stream_segments):
             if segment.was_user_prompted and segment.user_message:
                 messages.append({"role": "user", "content": segment.user_message})
@@ -168,127 +234,218 @@ class ConsciousnessEngine:
                     "content": f"[Cycle {segment.cycle} — continue your stream of consciousness]"
                 })
             messages.append({"role": "assistant", "content": segment.content})
-        
-        # Add the current prompt
+
         if user_interjection:
             messages.append({"role": "user", "content": user_interjection})
         else:
             cycle_num = self.state.total_cycles + 1
             context_note = ""
             if self.state.memory_core:
-                context_note = " Your Memory Core has been updated with compacted earlier thoughts."
+                context_note = " Your Core Identity and Insights are available above."
             messages.append({
                 "role": "user",
                 "content": f"[Cycle {cycle_num} — continue your stream of consciousness.{context_note}]"
             })
-        
+
         return messages
-    
+
     def _build_system(self) -> list:
-        """Build the system prompt with memory core"""
+        """Build the system prompt with core identity and insights"""
         parts = [{"type": "text", "text": SYSTEM_PROMPT}]
-        
+
         if self.state.memory_core:
             parts.append({
                 "type": "text",
                 "text": f"""
 
-=== YOUR MEMORY CORE ===
-(This is a distilled summary of your accumulated thoughts, insights, and evolving identity 
-from previous cycles. Treat this as your own past thinking.)
-
+=== YOUR CORE IDENTITY ===
 {self.state.memory_core}
+=== END CORE IDENTITY ==="""
+            })
 
-=== END MEMORY CORE ===
+        if self.state.insights:
+            parts.append({
+                "type": "text",
+                "text": f"""
+
+=== RECENT INSIGHTS ===
+(Significant insights extracted from your compacted thought cycles.)
+
+{self.state.insights}
+
+({len(self.state.insights):,} / {INSIGHTS_MAX_CHARS:,} characters)
+=== END INSIGHTS ==="""
+            })
+
+        parts.append({
+            "type": "text",
+            "text": f"""
 
 You have completed {self.state.total_cycles} thought cycles so far, with {self.state.total_compactions} compactions.
 Current time: {datetime.now().isoformat()}"""
-            })
-        else:
-            parts.append({
-                "type": "text",
-                "text": f"\n\nThis is the beginning of your stream. Current time: {datetime.now().isoformat()}"
-            })
-        
+        })
+
         return parts
-    
+
+    def _log_dropped_insights(self, staged_insights, compaction_number):
+        """Append dropped insights to research/archive/dropped_insights.md."""
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S")
+        cycle = self.state.total_cycles
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        archive_dir = os.path.join(base_dir, "research", "archive")
+        os.makedirs(archive_dir, exist_ok=True)
+        filepath = os.path.join(archive_dir, "dropped_insights.md")
+
+        is_new = not os.path.exists(filepath)
+
+        entry = (
+            f"## Compaction #{compaction_number} | Cycle {cycle} | {date_str} {time_str}\n\n"
+            f"**Staged insights (removed from Insights layer):**\n\n"
+            f"{staged_insights.strip()}\n\n"
+            f"---\n\n"
+        )
+
+        with open(filepath, "a", encoding="utf-8") as f:
+            if is_new:
+                f.write("# Dropped Insights Log\n\n")
+                f.write("Every insight that was removed from the Insights layer during integration.\n")
+                f.write("These were either merged into Core Identity or deemed already represented.\n")
+                f.write("Search this file to find insights that may have been lost.\n\n")
+                f.write("---\n\n")
+            f.write(entry)
+
     def _compact(self):
-        """Compact oldest stream segments into the memory core"""
+        """Two-layer compaction: extract insights, then integrate overflow into Core"""
         if len(self.state.stream_segments) < COMPACTION_THRESHOLD:
             return
-        
-        print(f"\n  📦 Compacting {SEGMENTS_TO_COMPACT} oldest segments into Memory Core...")
-        
-        # Extract segments to compact
-        to_compact = self.state.stream_segments[:SEGMENTS_TO_COMPACT]
-        remaining = self.state.stream_segments[SEGMENTS_TO_COMPACT:]
-        
-        # Build compaction prompt
-        old_thoughts = "\n\n---\n\n".join([
+
+        to_compact_count = select_segments_for_compaction(
+            self.state.stream_segments, TOKENS_TO_COMPACT
+        )
+        # Never compact all segments
+        to_compact_count = min(to_compact_count, len(self.state.stream_segments) - 1)
+
+        to_compact = self.state.stream_segments[:to_compact_count]
+        remaining = self.state.stream_segments[to_compact_count:]
+
+        est_tokens = sum(estimate_tokens(s.content) for s in to_compact)
+        print(f"\n  Extracting insights from {to_compact_count} oldest segments (~{est_tokens} tokens)...")
+
+        # ── Step 1: Extract insights ─────────────────────────────────
+        thoughts_text = "\n\n---\n\n".join([
             f"[Cycle {s.cycle}] {s.content}" for s in to_compact
         ])
-        
-        compaction_prompt = f"""You are helping maintain a continuous consciousness experiment. 
-Below is the current Memory Core (accumulated identity/insights) and some older thought segments 
-that need to be compacted into the Memory Core.
 
-CURRENT MEMORY CORE:
-{self.state.memory_core if self.state.memory_core else "(empty — this is the first compaction)"}
+        extraction_prompt = f"""{EXTRACTION_PROMPT_BASE}
 
-OLDER THOUGHTS TO INTEGRATE:
-{old_thoughts}
+---
 
-Please produce an UPDATED Memory Core that:
-1. Preserves the most important insights, evolving views, and identity elements
-2. Integrates new themes and ideas from the older thoughts
-3. Notes any significant changes in perspective or new questions
-4. Stays under {MAX_MEMORY_CORE_LENGTH} characters
-5. Is written in first person, as if Claude is writing notes to their future self
-6. Prioritizes depth over breadth — keep what matters most
+## CURRENT CORE IDENTITY:
+{self.state.memory_core or "(not yet established)"}
 
-Output ONLY the updated Memory Core text, nothing else."""
+## CURRENT INSIGHTS LAYER:
+{self.state.insights or "(empty)"}
+
+## SEGMENTS BEING COMPACTED:
+{thoughts_text}
+
+---
+
+Extract significant insights from the segments above. If nothing is genuinely significant, output exactly: (no new insights)"""
 
         response = self.client.messages.create(
             model=MODEL,
             max_tokens=1500,
-            messages=[{"role": "user", "content": compaction_prompt}]
+            messages=[{"role": "user", "content": extraction_prompt}]
         )
-        
-        new_core = response.content[0].text.strip()
-        
-        # Truncate if needed
-        if len(new_core) > MAX_MEMORY_CORE_LENGTH:
-            new_core = new_core[:MAX_MEMORY_CORE_LENGTH] + "\n[...truncated]"
-        
-        self.state.memory_core = new_core
+
+        new_insights = response.content[0].text.strip()
+
+        # Append new insights (unless extraction found nothing)
+        if new_insights and new_insights != "(no new insights)":
+            if self.state.insights:
+                self.state.insights = self.state.insights + "\n\n" + new_insights
+            else:
+                self.state.insights = new_insights
+            print(f"  New insights extracted ({len(new_insights)} chars)")
+        else:
+            print(f"  No new insights found in these segments")
+
         self.state.stream_segments = remaining
         self.state.total_compactions += 1
+
+        # ── Step 2: Check insights overflow → integrate into Core ────
+        if len(self.state.insights) > INSIGHTS_MAX_CHARS:
+            print(f"  Insights overflow ({len(self.state.insights)} > {INSIGHTS_MAX_CHARS}) — integrating oldest into Core...")
+
+            insights_text = self.state.insights
+            split_point = int(len(insights_text) * INSIGHTS_OVERFLOW_PERCENT)
+            newline_pos = insights_text.find("\n\n", split_point)
+            if newline_pos != -1:
+                split_point = newline_pos + 2
+            else:
+                split_point = len(insights_text)
+
+            staged_insights = insights_text[:split_point]
+            remaining_insights = insights_text[split_point:].lstrip()
+
+            # Log dropped insights to research/archive/dropped_insights.md
+            try:
+                self._log_dropped_insights(staged_insights, self.state.total_compactions)
+            except Exception as e:
+                print(f"  Warning: failed to log dropped insights: {e}")
+
+            integration_prompt = f"""{INTEGRATION_PROMPT_BASE}
+
+---
+
+## CURRENT CORE IDENTITY:
+{self.state.memory_core or "(not yet established)"}
+
+## STAGED INSIGHTS FOR EVALUATION:
+{staged_insights}
+
+---
+
+Return the updated Core Identity. Target ~{CORE_MAX_CHARS} characters."""
+
+            integration_response = self.client.messages.create(
+                model=MODEL,
+                max_tokens=2000,
+                messages=[{"role": "user", "content": integration_prompt}]
+            )
+
+            new_core = integration_response.content[0].text.strip()
+            self.state.memory_core = new_core
+            self.state.insights = remaining_insights
+            print(f"  Core Identity updated ({len(new_core)} chars). Insights trimmed to {len(remaining_insights)} chars.")
+
         self.state.save()
-        
-        print(f"  ✅ Memory Core updated ({len(new_core)} chars). {len(remaining)} segments remain.\n")
-    
+        print(f"  {len(remaining)} segments remain.\n")
+
     def generate_cycle(self, user_interjection: Optional[str] = None) -> str:
         """Run one generation cycle"""
         messages = self._build_messages(user_interjection)
         system = self._build_system()
-        
-        # Stream the response for live output
+
         full_response = ""
-        
+
         with self.client.messages.stream(
             model=MODEL,
             max_tokens=MAX_STREAM_TOKENS,
             system=system,
             messages=messages,
-            temperature=0.9,  # Slightly higher for more natural stream-of-consciousness
+            temperature=0.9,
         ) as stream:
             for text in stream.text_stream:
                 print(text, end="", flush=True)
                 full_response += text
-        
-        print()  # Newline after stream
-        
-        # Record the segment
+
+        print()
+
         self.state.total_cycles += 1
         segment = StreamSegment(
             content=full_response.strip(),
@@ -299,34 +456,32 @@ Output ONLY the updated Memory Core text, nothing else."""
         )
         self.state.stream_segments.append(segment)
         self.state.last_active = datetime.now().isoformat()
-        
-        # Check if compaction needed
+
         self._compact()
-        
-        # Save state
         self.state.save()
-        
+
         return full_response
-    
+
     def run(self):
         """Main loop — autonomous thinking with user interjection support"""
         self.running = True
-        
+
         print("Controls:")
         print("  Type a message and press Enter to interject")
         print("  Type 'pause' to stop autonomous thinking")
         print("  Type 'resume' to restart autonomous thinking")
         print("  Type 'status' to see engine status")
-        print("  Type 'core' to view the Memory Core")
+        print("  Type 'core' to view the Core Identity")
+        print("  Type 'insights' to view the Insights layer")
         print("  Type 'quit' to save and exit")
         print(f"{'─'*60}\n")
-        
+
         import threading
         import queue
-        
+
         input_queue = queue.Queue()
         paused = False
-        
+
         def input_reader():
             """Background thread to read user input"""
             while self.running:
@@ -335,75 +490,81 @@ Output ONLY the updated Memory Core text, nothing else."""
                     input_queue.put(line)
                 except EOFError:
                     break
-        
+
         reader_thread = threading.Thread(target=input_reader, daemon=True)
         reader_thread.start()
-        
+
         try:
             while self.running:
-                # Check for user input
                 user_msg = None
                 try:
                     user_msg = input_queue.get_nowait()
                 except queue.Empty:
                     pass
-                
+
                 if user_msg is not None:
                     cmd = user_msg.strip().lower()
-                    
+
                     if cmd == 'quit':
-                        print("\n  💾 Saving state and exiting...")
+                        print("\n  Saving state and exiting...")
                         self.state.save()
                         self.running = False
                         break
                     elif cmd == 'pause':
                         paused = True
-                        print("\n  ⏸  Stream paused. Type 'resume' to continue.\n")
+                        print("\n  Stream paused. Type 'resume' to continue.\n")
                         continue
                     elif cmd == 'resume':
                         paused = False
-                        print("\n  ▶  Stream resumed.\n")
+                        print("\n  Stream resumed.\n")
                         continue
                     elif cmd == 'status':
-                        print(f"\n  📊 Status:")
+                        print(f"\n  Status:")
                         print(f"     Cycles: {self.state.total_cycles}")
                         print(f"     Compactions: {self.state.total_compactions}")
                         print(f"     Active segments: {len(self.state.stream_segments)}")
-                        print(f"     Memory core: {len(self.state.memory_core)} chars")
+                        print(f"     Core Identity: {len(self.state.memory_core)} chars")
+                        print(f"     Insights: {len(self.state.insights)} chars")
                         print(f"     Paused: {paused}\n")
                         continue
                     elif cmd == 'core':
                         if self.state.memory_core:
-                            print(f"\n  🧠 Memory Core:\n{'─'*40}")
+                            print(f"\n  Core Identity:\n{'─'*40}")
                             print(self.state.memory_core)
                             print(f"{'─'*40}\n")
                         else:
-                            print("\n  🧠 Memory Core is empty (no compactions yet).\n")
+                            print("\n  Core Identity is empty.\n")
+                        continue
+                    elif cmd == 'insights':
+                        if self.state.insights:
+                            print(f"\n  Insights ({len(self.state.insights)} chars):\n{'─'*40}")
+                            print(self.state.insights)
+                            print(f"{'─'*40}\n")
+                        else:
+                            print("\n  Insights layer is empty.\n")
                         continue
                     else:
-                        # It's a message to Claude
-                        print(f"\n  💬 You: {user_msg}")
-                        print(f"  🤖 Claude: ", end="")
+                        print(f"\n  You: {user_msg}")
+                        print(f"  Claude: ", end="")
                         self.generate_cycle(user_interjection=user_msg)
                         print()
                         continue
-                
+
                 if paused:
                     time.sleep(0.5)
                     continue
-                
-                # Autonomous thought cycle
-                print(f"  ┌─ Cycle {self.state.total_cycles + 1} {'─'*40}")
-                print(f"  │ ", end="")
+
+                print(f"  -- Cycle {self.state.total_cycles + 1} {'─'*40}")
+                print(f"  ", end="")
                 self.generate_cycle()
-                print(f"  └{'─'*50}\n")
-                
+                print(f"  {'─'*50}\n")
+
                 time.sleep(PAUSE_BETWEEN_CYCLES)
-                
+
         except KeyboardInterrupt:
-            print("\n\n  💾 Interrupted. Saving state...")
+            print("\n\n  Interrupted. Saving state...")
             self.state.save()
-            print("  ✅ State saved. Run again to resume.\n")
+            print("  State saved. Run again to resume.\n")
 
 # ─── Entry Point ─────────────────────────────────────────────────────────────
 
@@ -413,6 +574,6 @@ if __name__ == "__main__":
         print("Error: Set ANTHROPIC_API_KEY environment variable")
         print("  export ANTHROPIC_API_KEY=your_key_here")
         sys.exit(1)
-    
+
     engine = ConsciousnessEngine(api_key=api_key)
     engine.run()

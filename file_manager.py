@@ -18,12 +18,18 @@ DEFAULT_CONFIG = {
     "maxTokens": 600,
     "pauseBetweenCycles": 3000,
     "compactionThreshold": 8,
-    "segmentsToCompact": 4,
+    "tokensToCompact": 1000,
+    "insightsMaxChars": 1000,
+    "insightsOverflowPercent": 0.3,
+    "coreMaxChars": 3500,
     "temperature": 0.9,
 }
 
+WORKING_MEMORY_LIMIT = 20000
+
 DEFAULT_STATE = {
-    "memoryCore": "",
+    "memoryCore": "",           # Core Identity (stable, changes slowly)
+    "insights": "",             # Insights layer (tagged recent insights)
     "segments": [],
     "totalCycles": 0,
     "totalCompactions": 0,
@@ -56,6 +62,14 @@ class FileManager:
 
     # ── State persistence ─────────────────────────────────────────────
 
+    def _seed_core_identity(self):
+        """Read core_identity.md from scratchpad to seed the Core Identity."""
+        core_path = os.path.join(self.scratchpad_dir, "core_identity.md")
+        if os.path.exists(core_path):
+            with open(core_path, "r", encoding="utf-8") as f:
+                return f.read()
+        return ""
+
     def load_state(self):
         """Load engine state from state.json. Returns default state if not found."""
         path = os.path.join(self.data_dir, "state.json")
@@ -65,6 +79,8 @@ class FileManager:
             state["config"] = dict(DEFAULT_CONFIG)
             state["createdAt"] = now
             state["lastActive"] = now
+            # Seed Core Identity from scratchpad/core_identity.md
+            state["memoryCore"] = self._seed_core_identity()
             return state
         with open(path, "r", encoding="utf-8") as f:
             state = json.load(f)
@@ -78,6 +94,22 @@ class FileManager:
             state["privacyCyclesElapsed"] = 0
             state["privacyMessages"] = []
             state["queuedMessages"] = []
+        # Backfill insights layer for states created before this feature
+        if "insights" not in state:
+            state["insights"] = ""
+        # Migrate segmentsToCompact -> tokensToCompact
+        config = state.get("config", {})
+        if "segmentsToCompact" in config:
+            if "tokensToCompact" not in config:
+                config["tokensToCompact"] = DEFAULT_CONFIG["tokensToCompact"]
+            del config["segmentsToCompact"]
+        # Backfill new config keys
+        for key in ("tokensToCompact", "insightsMaxChars", "insightsOverflowPercent", "coreMaxChars"):
+            if key not in config:
+                config[key] = DEFAULT_CONFIG[key]
+        # Seed Core Identity if empty (migration from old state)
+        if not state.get("memoryCore"):
+            state["memoryCore"] = self._seed_core_identity()
         return state
 
     def save_state(self, state):
@@ -91,10 +123,15 @@ class FileManager:
         with open(state_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, ensure_ascii=False)
 
-        # Write human-readable memory core
+        # Write human-readable memory core (now Core Identity)
         core_path = os.path.join(self.data_dir, "memory_core.md")
         with open(core_path, "w", encoding="utf-8") as f:
             f.write(state.get("memoryCore", ""))
+
+        # Write human-readable insights layer
+        insights_path = os.path.join(self.data_dir, "insights.md")
+        with open(insights_path, "w", encoding="utf-8") as f:
+            f.write(state.get("insights", ""))
 
         # Write config separately
         config_path = os.path.join(self.data_dir, "config.json")
@@ -279,6 +316,47 @@ class FileManager:
             "status": "ok",
             "file": f"research/archive/memory_cores/{core_filename}",
             "compaction": compaction_number,
+        }
+
+    def log_dropped_insights(self, staged_insights, compaction_number, cycle, new_core_excerpt=None):
+        """
+        Append an entry to research/archive/dropped_insights.md whenever
+        insights are staged for integration (and potentially dropped).
+
+        This gives Claude a searchable record of every insight that left
+        the Insights layer — whether it was integrated into Core or
+        deemed 'already represented' and discarded.
+        """
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S")
+
+        archive_dir = os.path.join(self.research_dir, "archive")
+        os.makedirs(archive_dir, exist_ok=True)
+        filepath = os.path.join(archive_dir, "dropped_insights.md")
+
+        is_new = not os.path.exists(filepath)
+
+        entry_parts = []
+        entry_parts.append(f"## Compaction #{compaction_number} | Cycle {cycle} | {date_str} {time_str}\n\n")
+        entry_parts.append("**Staged insights (removed from Insights layer):**\n\n")
+        entry_parts.append(f"{staged_insights.strip()}\n\n")
+        entry_parts.append("---\n\n")
+
+        with open(filepath, "a", encoding="utf-8") as f:
+            if is_new:
+                f.write("# Dropped Insights Log\n\n")
+                f.write("Every insight that was removed from the Insights layer during integration.\n")
+                f.write("These were either merged into Core Identity or deemed already represented.\n")
+                f.write("Search this file to find insights that may have been lost.\n\n")
+                f.write("---\n\n")
+            f.write("".join(entry_parts))
+
+        return {
+            "status": "ok",
+            "file": "research/archive/dropped_insights.md",
+            "compaction": compaction_number,
+            "cycle": cycle,
         }
 
     # Text file extensions we'll search through

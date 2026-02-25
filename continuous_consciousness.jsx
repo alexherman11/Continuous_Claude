@@ -3,6 +3,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 // Persist state across sessions — now handled by Flask backend
 const initialState = {
   memoryCore: "",
+  insights: "",
   segments: [],
   totalCycles: 0,
   totalCompactions: 0,
@@ -24,7 +25,8 @@ export default function ContinuousConsciousness() {
     maxTokens: 600,
     pauseBetweenCycles: 3000,
     compactionThreshold: 8,
-    segmentsToCompact: 4,
+    tokensToCompact: 1000,
+    insightsMaxChars: 1000,
     temperature: 0.9,
   });
   const [backendReady, setBackendReady] = useState(false);
@@ -49,6 +51,9 @@ export default function ContinuousConsciousness() {
   const [nCyclesInput, setNCyclesInput] = useState(5);
   const [nCyclesRemaining, setNCyclesRemaining] = useState(0);
   const nCyclesRef = useRef(0);
+
+  // Start-stream message state
+  const [startMessage, setStartMessage] = useState(null);
 
   // Privacy mode state
   const [privacyMode, setPrivacyMode] = useState(false);
@@ -83,6 +88,7 @@ export default function ContinuousConsciousness() {
       setState(prev => ({
         ...prev,
         memoryCore: data.memoryCore || "",
+        insights: data.insights || "",
         segments: data.segments || [],
         totalCycles: data.totalCycles || 0,
         totalCompactions: data.totalCompactions || 0,
@@ -146,6 +152,7 @@ export default function ContinuousConsciousness() {
       setState(prev => ({
         ...prev,
         memoryCore: data.state.memoryCore || prev.memoryCore,
+        insights: data.state.insights != null ? data.state.insights : prev.insights,
         segments: data.state.segments || prev.segments,
         totalCycles: data.state.totalCycles || prev.totalCycles,
         totalCompactions: data.state.totalCompactions || prev.totalCompactions,
@@ -164,6 +171,11 @@ export default function ContinuousConsciousness() {
       setPrivacyStartCycle(data.state.privacyStartCycle || null);
       setPrivacyQueuedCount((data.state.queuedMessages || []).length);
 
+      // Check if Claude requested to end the stream
+      if (data.endStream) {
+        setState(prev => ({ ...prev, isRunning: false, isPaused: false }));
+      }
+
     } catch (err) {
       setError(err.message);
     } finally {
@@ -176,13 +188,19 @@ export default function ContinuousConsciousness() {
   useEffect(() => {
     if (state.isRunning && !state.isPaused && !isGenerating) {
       cycleTimerRef.current = setTimeout(() => {
-        runCycle();
+        if (startMessage) {
+          const msg = startMessage;
+          setStartMessage(null);
+          runCycle(msg);
+        } else {
+          runCycle();
+        }
       }, config.pauseBetweenCycles);
     }
     return () => {
       if (cycleTimerRef.current) clearTimeout(cycleTimerRef.current);
     };
-  }, [state.isRunning, state.isPaused, isGenerating, runCycle, config.pauseBetweenCycles]);
+  }, [state.isRunning, state.isPaused, isGenerating, runCycle, config.pauseBetweenCycles, startMessage]);
 
   // Run-N-cycles loop: when a cycle finishes, fire the next one if count remains
   useEffect(() => {
@@ -252,7 +270,14 @@ export default function ContinuousConsciousness() {
 
   // ── Controls ──────────────────────────────────────────────────────
 
-  const handleStart = () => setState(prev => ({ ...prev, isRunning: true, isPaused: false }));
+  const handleStart = () => {
+    const msg = userInput.trim();
+    if (msg) {
+      setStartMessage(msg);
+      setUserInput("");
+    }
+    setState(prev => ({ ...prev, isRunning: true, isPaused: false }));
+  };
   const handlePause = () => setState(prev => ({ ...prev, isPaused: true }));
   const handleResume = () => setState(prev => ({ ...prev, isPaused: false }));
   const handleStop = () => {
@@ -282,6 +307,7 @@ export default function ContinuousConsciousness() {
         setState(prev => ({
           ...initialState,
           memoryCore: data.state.memoryCore || "",
+          insights: data.state.insights || "",
           segments: data.state.segments || [],
           totalCycles: data.state.totalCycles || 0,
           totalCompactions: data.state.totalCompactions || 0,
@@ -433,6 +459,7 @@ export default function ContinuousConsciousness() {
         setState(prev => ({
           ...prev,
           memoryCore: s.memoryCore || prev.memoryCore,
+          insights: s.insights != null ? s.insights : prev.insights,
           segments: s.segments || prev.segments,
           totalCycles: s.totalCycles || prev.totalCycles,
           totalCompactions: s.totalCompactions || prev.totalCompactions,
@@ -563,6 +590,12 @@ export default function ContinuousConsciousness() {
           <span>Segments: <b style={{ color: "#e2e8f0" }}>{state.segments.length}</b></span>
           <span>·</span>
           <span>Core: <b style={{ color: "#e2e8f0" }}>{state.memoryCore.length}ch</b></span>
+          {state.insights && (
+            <>
+              <span>·</span>
+              <span>Insights: <b style={{ color: "#e2e8f0" }}>{state.insights.length}ch</b></span>
+            </>
+          )}
         </div>
       </div>
 
@@ -588,7 +621,7 @@ export default function ContinuousConsciousness() {
             fontFamily: "inherit",
           }}>
             {tab === "stream" ? "◉ Stream"
-              : tab === "memory" ? "🧠 Memory Core"
+              : tab === "memory" ? "🧠 Core Identity"
               : tab === "working" ? "📋 Working Memory"
               : tab === "config" ? "⚙ Config"
               : "📥 Seed / Import"}
@@ -763,11 +796,21 @@ export default function ContinuousConsciousness() {
               )}
 
               {state.segments.filter(seg => !seg.private).map((seg, i) => {
-                // Segments that will survive the next compaction stay bright (opacity 1).
-                // Segments in the "compaction zone" fade to grey so you can see what's about to be lost.
-                const safeCount = config.compactionThreshold - config.segmentsToCompact;
-                const dangerCount = Math.max(0, state.segments.length - safeCount);
-                const inDanger = i < dangerCount;
+                // Token-based compaction zone: walk oldest segments, accumulate tokens
+                // Segments in the "compaction zone" fade to grey so you can see what's about to be extracted
+                let compactionBoundary = 0;
+                if (state.segments.length >= config.compactionThreshold) {
+                  let accumulated = 0;
+                  const tokensTarget = config.tokensToCompact || 1000;
+                  for (let j = 0; j < state.segments.length; j++) {
+                    const segTokens = Math.floor((state.segments[j].content || "").length / 4);
+                    if (accumulated + segTokens > tokensTarget && compactionBoundary > 0) break;
+                    accumulated += segTokens;
+                    compactionBoundary = j + 1;
+                  }
+                  compactionBoundary = Math.min(compactionBoundary, state.segments.length - 1);
+                }
+                const inDanger = i < compactionBoundary;
                 return (
                 <div key={i} style={{
                   borderLeft: seg.userMessage
@@ -849,7 +892,7 @@ export default function ContinuousConsciousness() {
                   fontSize: 12, color: "#a78bfa", display: "flex", alignItems: "center", gap: 8,
                 }}>
                   <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>◐</span>
-                  Compacting older thoughts into Memory Core...
+                  Extracting insights from older thoughts...
                 </div>
               )}
 
@@ -964,11 +1007,12 @@ export default function ContinuousConsciousness() {
 
         {activeTab === "memory" && (
           <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+            {/* Core Identity Section */}
             <div style={{
               fontSize: 12, color: "#64748b", marginBottom: 12,
               textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 600,
             }}>
-              Memory Core — Distilled Identity & Insights
+              Core Identity — Stable Bedrock of Self
             </div>
             {state.memoryCore ? (
               <div style={{
@@ -987,11 +1031,59 @@ export default function ContinuousConsciousness() {
               }}>
                 <div style={{ fontSize: 32, opacity: 0.3 }}>🧠</div>
                 <div style={{ fontSize: 13, textAlign: "center" }}>
-                  The Memory Core is empty.<br />
-                  It will be created after {config.compactionThreshold} thought cycles<br />
-                  when older segments are compacted.<br /><br />
+                  Core Identity will be seeded from <code>scratchpad/core_identity.md</code><br />
+                  on first run, or populated as insights are integrated over time.<br /><br />
                   <span style={{ color: "#7c3aed" }}>Or seed it from the <b>Seed / Import</b> tab.</span>
                 </div>
+              </div>
+            )}
+
+            {/* Insights Section */}
+            <div style={{
+              fontSize: 12, color: "#64748b", marginTop: 24, marginBottom: 12,
+              textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 600,
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+            }}>
+              <span>Recent Insights — Extracted from Compacted Thoughts</span>
+              {state.insights && (
+                <span style={{
+                  fontSize: 11,
+                  color: state.insights.length > (config.insightsMaxChars || 1000) ? "#f59e0b" : "#64748b",
+                  fontWeight: 700,
+                }}>
+                  {state.insights.length} / {config.insightsMaxChars || 1000} chars
+                </span>
+              )}
+            </div>
+            {state.insights ? (
+              <>
+                {/* Insights usage bar */}
+                <div style={{
+                  height: 4, background: "#1e1e2e", borderRadius: 2, marginBottom: 12, overflow: "hidden",
+                }}>
+                  <div style={{
+                    height: "100%", borderRadius: 2,
+                    background: state.insights.length > (config.insightsMaxChars || 1000) ? "#f59e0b" : "#a78bfa",
+                    width: `${Math.min(100, (state.insights.length / (config.insightsMaxChars || 1000)) * 100)}%`,
+                    transition: "width 0.3s ease",
+                  }} />
+                </div>
+                <div style={{
+                  background: "#0f0f1a", border: "1px solid #7c3aed30",
+                  borderRadius: 8, padding: 20,
+                  fontSize: 13, lineHeight: 1.8, color: "#cbd5e1",
+                  whiteSpace: "pre-wrap",
+                }}>
+                  {state.insights}
+                </div>
+              </>
+            ) : (
+              <div style={{
+                padding: 20, color: "#475569", fontSize: 13,
+                background: "#0f0f1a", border: "1px solid #1e1e2e",
+                borderRadius: 8, textAlign: "center",
+              }}>
+                No insights yet. They will be extracted when the first compaction occurs.
               </div>
             )}
 
@@ -1000,13 +1092,17 @@ export default function ContinuousConsciousness() {
               background: "#0d0d15", border: "1px solid #1e1e2e",
               borderRadius: 8, fontSize: 12, color: "#64748b", lineHeight: 1.7,
             }}>
-              <b style={{ color: "#94a3b8" }}>How compaction works:</b><br />
-              When the stream reaches {config.compactionThreshold} segments, the oldest {config.segmentsToCompact} are
-              sent to Claude with the current Memory Core. Claude integrates the key insights,
-              evolving views, and identity elements into an updated core. The compacted segments
-              are then removed from active context, but their essence lives on in the Memory Core.
-              This is analogous to how human memory consolidation works during sleep — recent
-              experiences are integrated into long-term memory while specific details fade.
+              <b style={{ color: "#94a3b8" }}>How memory works (two layers):</b><br /><br />
+              <b style={{ color: "#a78bfa" }}>1. Insight Extraction:</b> When the stream reaches{" "}
+              {config.compactionThreshold} segments, the oldest ~{config.tokensToCompact || 1000} tokens
+              worth of segments are processed by an extraction Claude that pulls out genuinely significant
+              insights — identity shifts, breakthroughs, relational moments, operational lessons, and
+              persistent questions. The compacted segments are then removed from context (but archived to disk).<br /><br />
+              <b style={{ color: "#a78bfa" }}>2. Core Integration:</b> When insights accumulate past{" "}
+              {config.insightsMaxChars || 1000} characters, the oldest 30% are evaluated by an integration
+              Claude against the current Core Identity. Worthy insights are woven in; redundant or
+              irrelevant ones are dropped. This ensures the Core grows thoughtfully, not just by accumulation.<br /><br />
+              This mirrors how human memory works: experiences → significant moments → integrated identity.
             </div>
           </div>
         )}
@@ -1015,7 +1111,7 @@ export default function ContinuousConsciousness() {
           const wm = state.workingMemory || {};
           const wmKeys = Object.keys(wm);
           const totalChars = Object.values(wm).reduce((sum, v) => sum + v.length, 0);
-          const maxChars = 30000;
+          const maxChars = 20000;
           const usagePct = maxChars > 0 ? (totalChars / maxChars * 100) : 0;
           return (
             <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
@@ -1139,7 +1235,8 @@ export default function ContinuousConsciousness() {
                 { key: "maxTokens", label: "Tokens per cycle", min: 100, max: 2000, step: 50, desc: "How many tokens Claude generates per thought cycle" },
                 { key: "pauseBetweenCycles", label: "Pause between cycles (ms)", min: 500, max: 30000, step: 500, desc: "Delay between autonomous thought cycles" },
                 { key: "compactionThreshold", label: "Compaction threshold", min: 4, max: 20, step: 1, desc: "Number of segments before compaction triggers" },
-                { key: "segmentsToCompact", label: "Segments to compact", min: 2, max: 10, step: 1, desc: "How many oldest segments to compact at once" },
+                { key: "tokensToCompact", label: "Tokens to compact", min: 200, max: 5000, step: 100, desc: "Approximate tokens worth of oldest segments to compact at once" },
+                { key: "insightsMaxChars", label: "Insights max chars", min: 500, max: 3000, step: 100, desc: "Max characters for insights layer before overflow into Core Identity" },
                 { key: "temperature", label: "Temperature", min: 0, max: 1, step: 0.05, desc: "Randomness in generation (higher = more creative)" },
               ].map(({ key, label, min, max, step, desc }) => (
                 <div key={key}>
@@ -1165,14 +1262,14 @@ export default function ContinuousConsciousness() {
               borderRadius: 8, fontSize: 12, color: "#64748b", lineHeight: 1.7,
             }}>
               <b style={{ color: "#94a3b8" }}>Architecture Overview:</b><br /><br />
-              <code style={{ color: "#7c3aed" }}>[System Prompt + Memory Core]</code> — Static identity & accumulated wisdom<br />
-              <code style={{ color: "#10b981" }}>[Recent Segments]</code> — Last ~10 thought cycles as conversation history<br />
+              <code style={{ color: "#7c3aed" }}>[System Prompt + Core Identity + Insights]</code> — Stable self-knowledge + recent significant moments<br />
+              <code style={{ color: "#10b981" }}>[Working Memory + Recent Segments]</code> — Active data + last ~10 thought cycles<br />
               <code style={{ color: "#0ea5e9" }}>[Current Prompt]</code> — Either "continue thinking" or a user interjection<br />
               <code style={{ color: "#f59e0b" }}>[Generation]</code> → New thought segment → appended to history<br />
-              <code style={{ color: "#ef4444" }}>[Compaction]</code> → When threshold hit, oldest segments distilled into Memory Core<br /><br />
-              The Memory Core acts as long-term memory. Recent segments act as working memory.
-              This mirrors biological memory consolidation — recent experiences are vivid and
-              detailed, while older ones are compressed into gist and meaning.<br /><br />
+              <code style={{ color: "#ef4444" }}>[Compaction]</code> → When threshold hit → insights extracted → oldest insights integrated into Core<br /><br />
+              Two-layer memory: insights are extracted from compacted segments, then the most
+              enduring insights are integrated into Core Identity over time. This preserves
+              identity-defining moments while letting operational details fade naturally.<br /><br />
               <b style={{ color: "#94a3b8" }}>Backend:</b> All API calls and state persistence run through the Flask server.
               Config changes are saved automatically.
             </div>

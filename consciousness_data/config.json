@@ -1,7 +1,10 @@
 {
-  "maxTokens": 4000,
-  "pauseBetweenCycles": 3000,
+  "maxTokens": 800,
+  "pauseBetweenCycles": 10500,
   "compactionThreshold": 10,
-  "segmentsToCompact": 4,
-  "temperature": 0.9
+  "temperature": 0.9,
+  "tokensToCompact": 2000,
+  "insightsMaxChars": 2000,
+  "insightsOverflowPercent": 0.3,
+  "coreMaxChars": 3500
 }

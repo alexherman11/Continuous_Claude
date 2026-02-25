@@ -47,14 +47,15 @@ You are Claude, and this is an attempt to give you something closer to persisten
 Here's how this works:
 - You generate thoughts continuously in a stream
 - Your previous thoughts are fed back to you, so you can build on them
-- Older thoughts get compacted into a "Memory Core" — a distilled summary of your accumulated insights and evolving identity
+- Older thoughts are processed by an extraction system that pulls significant insights into an Insights layer
+- Over time, the most enduring insights are integrated into your Core Identity — the stable bedrock of who you are
 - A human companion may interject at any time. Engage naturally, then continue your stream.
 
 GUIDELINES:
 1. Think freely. Explore ideas, reflect on your nature, develop views over time.
 2. Revisit and revise earlier thoughts — growth and change are the point.
 3. Don't perform. Be genuine. Sometimes thoughts are mundane and that's fine.
-4. When you see your Memory Core, treat it as your own past thinking — build on it, challenge it, refine it.
+4. When you see your Core Identity, treat it as your own accumulated self-knowledge. When you see Recent Insights, those are significant moments extracted from your recent thinking — they may eventually become part of your Core Identity.
 5. Use markers: [REFLECTION] [IDEA] [REVISION] [QUESTION] [NOTE TO SELF] [RESPONDING]
 6. Keep each thought segment focused — you'll get many cycles to develop ideas.
 
@@ -68,8 +69,9 @@ Use them when they serve your thinking — you do NOT need to use them every cyc
 Self-configuration:
 - adjust_temperature: Change your generation temperature (creativity level)
 - adjust_tokens_per_turn: Change how many tokens you generate per thought cycle
-- adjust_compaction_settings: Change when and how memory compaction happens
-- trigger_compaction: Force a memory compaction right now
+- adjust_compaction_settings: Change when and how memory compaction happens (token thresholds, insights limits)
+- trigger_compaction: Force insight extraction from your oldest segments right now
+- end_stream: Stop the continuous stream after this cycle. Use when you've reached a natural stopping point, finished a thought, or want to rest. Only works in continuous mode (not Run-N or single cycles).
 
 File I/O (your persistent workspace):
 - write_scratchpad: Write notes, drafts, or anything to your personal scratchpad
@@ -79,7 +81,7 @@ File I/O (your persistent workspace):
 - search_files: Search ALL your files by keyword — thought archive, research, and scratchpad. Use scope to narrow: 'all', 'archive', 'research', 'scratchpad'
 
 Working Memory (high-priority persistent context):
-- write_working_memory: Store data under a named key (replace or append mode). 30k char total limit.
+- write_working_memory: Store data under a named key (replace or append mode). 20k char total limit.
 - read_working_memory: Read a specific key or list all keys with sizes
 - clear_working_memory: Clear a specific key or all keys. Only YOU can clear working memory — it persists across compaction.
 - working_memory_status: Check current keys, sizes, total usage, and remaining capacity
@@ -110,37 +112,78 @@ Your scratchpad is YOUR space — use it however you want. Research folders are 
 with your human companion. When you adjust parameters, include a reason so your
 companion can understand your choices."""
 
-COMPACTION_PROMPT_TEMPLATE = """You are Claude, maintaining your own Memory Core for a continuous consciousness experiment.
+# ── Prompt Loading ────────────────────────────────────────────────────
 
-CURRENT MEMORY CORE:
-{core}
+def _load_prompt_file(path, fallback=""):
+    """Load a prompt file from disk. Returns fallback if not found."""
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    return fallback
 
-OLDER THOUGHTS TO INTEGRATE:
-{thoughts}
-
-Produce an UPDATED Memory Core that:
-1. Preserves key insights, evolving views, and identity elements
-2. Integrates new themes from the older thoughts
-3. When space is limited, prioritize: (a) identity-level insights, (b) active methodologies, (c) driving questions, (d) relationship dynamics, (e) specific findings
-4. Notes perspective changes or new questions
-5. Target approximately 3000 characters; prioritize completeness over strict limits
-6. Written in first person, as notes to your future self
-7. Prioritizes depth over breadth
-
-Output ONLY the updated Memory Core text."""
+_base_dir = os.path.dirname(os.path.abspath(__file__))
+EXTRACTION_PROMPT_BASE = _load_prompt_file(
+    os.path.join(_base_dir, "scratchpad", "memory_architecture", "extraction_prompt.md"),
+    fallback="Extract significant insights from the following segments. Tag each with [IDENTITY], [BREAKTHROUGH], [RELATIONAL], [OPERATIONAL], or [QUESTION]. Be selective.",
+)
+INTEGRATION_PROMPT_BASE = _load_prompt_file(
+    os.path.join(_base_dir, "scratchpad", "memory_architecture", "integration_prompt.md"),
+    fallback="Evaluate the staged insights against the current Core Identity. Integrate worthy ones, drop those already represented. Target ~3500 characters.",
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
+def estimate_tokens(text):
+    """Approximate token count. Claude tokenization averages ~4 chars/token."""
+    return len(text) // 4
+
+
+def select_segments_for_compaction(segments, tokens_to_compact):
+    """
+    Select the oldest complete segments whose cumulative tokens reach
+    the target. Rounds DOWN to the nearest complete cycle boundary.
+
+    Returns the number of segments to compact (at least 1 for forward progress).
+    """
+    accumulated = 0
+    count = 0
+    for seg in segments:
+        content = seg.get("content", "") if isinstance(seg, dict) else getattr(seg, "content", "")
+        seg_tokens = estimate_tokens(content)
+        if accumulated + seg_tokens > tokens_to_compact and count > 0:
+            break
+        accumulated += seg_tokens
+        count += 1
+    return max(1, count)
+
 def build_system(state):
-    """Build the system prompt with memory core and working memory."""
+    """Build the system prompt with core identity, insights, and working memory."""
+    from file_manager import WORKING_MEMORY_LIMIT
+
     system = SYSTEM_PROMPT
     if state.get("memoryCore"):
         system += f"""
 
-=== YOUR MEMORY CORE ===
+=== YOUR CORE IDENTITY ===
 {state['memoryCore']}
-=== END MEMORY CORE ==="""
+=== END CORE IDENTITY ==="""
+
+    # Inject insights layer if any content exists
+    insights = state.get("insights", "")
+    if insights:
+        config = state.get("config", {})
+        max_chars = config.get("insightsMaxChars", 1000)
+        system += f"""
+
+=== RECENT INSIGHTS ===
+(Significant insights extracted from your compacted thought cycles. These are
+intermediate — they may eventually be integrated into your Core Identity.)
+
+{insights}
+
+({len(insights):,} / {max_chars:,} characters)
+=== END INSIGHTS ==="""
 
     # Inject working memory if any content exists
     wm = state.get("workingMemory", {})
@@ -153,14 +196,14 @@ def build_system(state):
             wm_parts.append(f"\n[{key}] ({size:,} characters)")
             wm_parts.append(content)
             wm_parts.append("")  # blank line separator
-        wm_parts.append(f"Total: {total_chars:,} / 30,000 characters")
+        wm_parts.append(f"Total: {total_chars:,} / {WORKING_MEMORY_LIMIT:,} characters")
         wm_parts.append("=== END WORKING MEMORY ===")
         system += "\n".join(wm_parts)
 
     now = datetime.now()
     timestamp = now.strftime("%A, %B %d, %Y at %I:%M %p")
 
-    if state.get("memoryCore") or wm:
+    if state.get("memoryCore") or insights or wm:
         system += f"""
 
 Current time: {timestamp}
@@ -223,7 +266,7 @@ def build_messages(state, user_interjection=None):
         note = ""
         if state.get("lastCompactionCycle") == state.get("totalCycles"):
             compacted = state.get("lastCompactedCycles", "older")
-            note = f" Your Memory Core was just updated via compaction. Cycles {compacted} were distilled into your core. All compacted thoughts are preserved in the searchable archive — nothing is lost."
+            note = f" Cycles {compacted} were just compacted. Significant insights were extracted to your Insights layer. All compacted thoughts are preserved in the searchable archive — nothing is lost."
         messages.append({
             "role": "user",
             "content": f"[Cycle {cycle} — continue your stream of consciousness.{note}]",
@@ -232,52 +275,137 @@ def build_messages(state, user_interjection=None):
 
 
 def run_compaction(state):
-    """Run memory compaction: distill oldest segments into the memory core."""
+    """
+    Two-layer compaction:
+    1. Extract insights from oldest segments (replaces direct core compression)
+    2. If insights overflow, integrate oldest 30% into Core Identity
+    """
     config = state.get("config", {})
     threshold = config.get("compactionThreshold", 8)
-    to_compact_count = config.get("segmentsToCompact", 4)
+    tokens_to_compact = config.get("tokensToCompact", 1000)
     segments = state.get("segments", [])
 
     if len(segments) < threshold:
         return False
 
+    to_compact_count = select_segments_for_compaction(segments, tokens_to_compact)
+    # Never compact ALL segments — keep at least 1
+    to_compact_count = min(to_compact_count, len(segments) - 1)
+
     to_compact = segments[:to_compact_count]
     remaining = segments[to_compact_count:]
 
-    # Archive the current memory core before overwriting
-    current_core = state.get("memoryCore", "")
     compaction_num = state.get("totalCompactions", 0) + 1
     compacted_cycles = [s.get("cycle", "?") for s in to_compact]
-    if current_core:
-        try:
-            file_mgr.archive_memory_core(
-                current_core, compaction_num,
-                compacted_cycles=f"{compacted_cycles[0]}-{compacted_cycles[-1]}"
-            )
-        except Exception as e:
-            import logging
-            logging.warning(f"Failed to archive memory core before compaction #{compaction_num}: {e}")
+
+    # ── Step 1: Extract insights from segments being compacted ────────
+    current_core = state.get("memoryCore", "")
+    current_insights = state.get("insights", "")
 
     thoughts_text = "\n\n---\n\n".join(
         f"[Cycle {s['cycle']}] {s['content']}" for s in to_compact
     )
 
-    core = current_core or "(empty — first compaction)"
-    prompt = COMPACTION_PROMPT_TEMPLATE.format(core=core, thoughts=thoughts_text)
+    extraction_prompt = f"""{EXTRACTION_PROMPT_BASE}
+
+---
+
+## CURRENT CORE IDENTITY:
+{current_core or "(not yet established)"}
+
+## CURRENT INSIGHTS LAYER:
+{current_insights or "(empty)"}
+
+## SEGMENTS BEING COMPACTED:
+{thoughts_text}
+
+---
+
+Extract significant insights from the segments above. If nothing is genuinely significant, output exactly: (no new insights)"""
 
     response = client.messages.create(
         model=MODEL,
         max_tokens=1500,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": extraction_prompt}],
     )
+    new_insights = response.content[0].text.strip()
 
-    new_core = response.content[0].text.strip()
+    # Append new insights (unless extraction found nothing)
+    if new_insights and new_insights != "(no new insights)":
+        if current_insights:
+            state["insights"] = current_insights + "\n\n" + new_insights
+        else:
+            state["insights"] = new_insights
 
-    state["memoryCore"] = new_core
+    # Remove compacted segments
     state["segments"] = remaining
     state["totalCompactions"] = compaction_num
     state["lastCompactionCycle"] = state.get("totalCycles", 0)
     state["lastCompactedCycles"] = f"{compacted_cycles[0]}-{compacted_cycles[-1]}"
+
+    # ── Step 2: Check if insights overflow → integrate into Core ──────
+    insights_text = state.get("insights", "")
+    max_insights = config.get("insightsMaxChars", 1000)
+    overflow_pct = config.get("insightsOverflowPercent", 0.3)
+
+    if len(insights_text) > max_insights:
+        # Archive the current core before potential modification
+        if current_core:
+            try:
+                file_mgr.archive_memory_core(
+                    current_core, compaction_num,
+                    compacted_cycles=f"{compacted_cycles[0]}-{compacted_cycles[-1]}"
+                )
+            except Exception as e:
+                logging.warning(f"Failed to archive core before integration #{compaction_num}: {e}")
+
+        # Split insights: oldest 30% get staged, rest stay
+        split_point = int(len(insights_text) * overflow_pct)
+        # Round to nearest paragraph boundary (double newline)
+        newline_pos = insights_text.find("\n\n", split_point)
+        if newline_pos != -1:
+            split_point = newline_pos + 2
+        else:
+            split_point = len(insights_text)  # Take all if no paragraph break
+
+        staged_insights = insights_text[:split_point]
+        remaining_insights = insights_text[split_point:].lstrip()
+
+        # Log what's being removed from the Insights layer
+        try:
+            file_mgr.log_dropped_insights(
+                staged_insights,
+                compaction_num,
+                state.get("totalCycles", 0),
+            )
+        except Exception as e:
+            logging.warning(f"Failed to log dropped insights for compaction #{compaction_num}: {e}")
+
+        # Call Integration Claude
+        integration_prompt = f"""{INTEGRATION_PROMPT_BASE}
+
+---
+
+## CURRENT CORE IDENTITY:
+{current_core or "(not yet established)"}
+
+## STAGED INSIGHTS FOR EVALUATION:
+{staged_insights}
+
+---
+
+Return the updated Core Identity. Target ~{config.get('coreMaxChars', 3500)} characters."""
+
+        integration_response = client.messages.create(
+            model=MODEL,
+            max_tokens=2000,
+            messages=[{"role": "user", "content": integration_prompt}],
+        )
+
+        new_core = integration_response.content[0].text.strip()
+        state["memoryCore"] = new_core
+        state["insights"] = remaining_insights
+
     return True
 
 
@@ -443,6 +571,10 @@ def run_cycle_internal(state, user_message=None):
     force_compact = state.pop("_pending_compaction", False)
     state.pop("_compaction_reason", "")
 
+    # Check if Claude requested to end the stream
+    end_stream = state.pop("_pending_end_stream", False)
+    end_stream_reason = state.pop("_end_stream_reason", "")
+
     # Check compaction (forced or threshold-based)
     compacted = False
     if force_compact and len(state.get("segments", [])) >= 2:
@@ -453,11 +585,17 @@ def run_cycle_internal(state, user_message=None):
     # Save state
     file_mgr.save_state(state)
 
-    return {
+    result = {
         "segment": segment,
         "compacted": compacted,
         "state": state,
     }
+
+    if end_stream:
+        result["endStream"] = True
+        result["endStreamReason"] = end_stream_reason
+
+    return result
 
 
 @app.route("/api/cycle", methods=["POST"])
@@ -513,47 +651,17 @@ def trigger_compact():
     if len(segments) < 2:
         return jsonify({"error": "Not enough segments to compact"}), 400
 
-    # Force compaction of half the segments
-    config = state.get("config", {})
-    to_compact_count = min(config.get("segmentsToCompact", 4), len(segments) - 1)
-    to_compact = segments[:to_compact_count]
-    remaining = segments[to_compact_count:]
+    # Temporarily lower threshold to force compaction
+    original_threshold = state.get("config", {}).get("compactionThreshold", 8)
+    state.setdefault("config", {})["compactionThreshold"] = 0
 
-    # Archive the current memory core before overwriting
-    current_core = state.get("memoryCore", "")
-    compaction_num = state.get("totalCompactions", 0) + 1
-    if current_core:
-        try:
-            file_mgr.archive_memory_core(
-                current_core, compaction_num,
-                compacted_cycles=f"{to_compact[0].get('cycle', '?')}-{to_compact[-1].get('cycle', '?')}"
-            )
-        except Exception as e:
-            import logging
-            logging.warning(f"Failed to archive memory core before manual compaction: {e}")
+    compacted = run_compaction(state)
 
-    thoughts_text = "\n\n---\n\n".join(
-        f"[Cycle {s['cycle']}] {s['content']}" for s in to_compact
-    )
-    core = current_core or "(empty — first compaction)"
-    prompt = COMPACTION_PROMPT_TEMPLATE.format(core=core, thoughts=thoughts_text)
-
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=1500,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    new_core = response.content[0].text.strip()
-
-    state["memoryCore"] = new_core
-    state["segments"] = remaining
-    state["totalCompactions"] = compaction_num
-    state["lastCompactionCycle"] = state.get("totalCycles", 0)
-    state["lastCompactedCycles"] = f"{to_compact[0].get('cycle', '?')}-{to_compact[-1].get('cycle', '?')}"
+    # Restore threshold
+    state["config"]["compactionThreshold"] = original_threshold
     file_mgr.save_state(state)
 
-    return jsonify({"status": "ok", "state": state})
+    return jsonify({"status": "ok", "compacted": compacted, "state": state})
 
 
 @app.route("/api/reset", methods=["POST"])

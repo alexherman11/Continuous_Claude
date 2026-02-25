@@ -1,16 +1,17 @@
 """
 Tool definitions for the Continuous Consciousness Engine.
 
-Defines the 14 tools Claude can use during thought cycles,
+Defines the 15 tools Claude can use during thought cycles,
 plus the execute_tool() dispatcher that processes requests server-side.
 
-Tools fall into 6 categories:
+Tools fall into 7 categories:
 1. Self-configuration — Claude adjusts its own parameters
 2. File writing — Claude writes to scratchpad or research
 3. File editing — Claude makes precise edits to existing files (str_replace)
 4. File reading — Claude reads back files or lists contents (with line ranges)
 5. Archive search — Claude searches its own thought history
 6. Working memory — Claude manages high-priority persistent context
+7. Stream control — Claude can stop the continuous stream
 
 Security: execute_tool() is the single gatekeeper. Only known tools
 execute. Path sanitization is handled by FileManager. Unknown tools
@@ -21,7 +22,8 @@ import json
 
 # ── Working memory constants ─────────────────────────────────────────
 
-WORKING_MEMORY_MAX_CHARS = 30_000
+from file_manager import WORKING_MEMORY_LIMIT
+WORKING_MEMORY_MAX_CHARS = WORKING_MEMORY_LIMIT
 
 # ── Anthropic tool schemas ────────────────────────────────────────────
 
@@ -82,7 +84,9 @@ TOOL_SCHEMAS = [
         "description": (
             "Adjust when and how memory compaction happens. "
             "Compaction threshold is how many segments accumulate before compaction triggers. "
-            "Segments to compact is how many of the oldest segments get distilled. "
+            "Tokens to compact is the approximate number of tokens worth of oldest segments "
+            "that get processed for insight extraction (rounds down to complete cycle boundaries). "
+            "Insights max chars controls when the insights layer overflows into Core Identity. "
             "Include a reason so your human companion can understand your choice."
         ),
         "input_schema": {
@@ -94,11 +98,17 @@ TOOL_SCHEMAS = [
                     "maximum": 20,
                     "description": "Number of segments before compaction triggers (4 to 20)",
                 },
-                "segments_to_compact": {
+                "tokens_to_compact": {
                     "type": "integer",
-                    "minimum": 2,
-                    "maximum": 10,
-                    "description": "How many oldest segments to compact at once (2 to 10)",
+                    "minimum": 200,
+                    "maximum": 5000,
+                    "description": "Approximate tokens worth of oldest segments to compact at once (200 to 5000)",
+                },
+                "insights_max_chars": {
+                    "type": "integer",
+                    "minimum": 500,
+                    "maximum": 3000,
+                    "description": "Max characters for insights layer before overflow into Core Identity (500 to 3000)",
                 },
                 "reason": {
                     "type": "string",
@@ -111,10 +121,12 @@ TOOL_SCHEMAS = [
     {
         "name": "trigger_compaction",
         "description": (
-            "Force a memory compaction right now, regardless of the threshold. "
-            "Your oldest segments will be distilled into your Memory Core. "
+            "Force insight extraction from your oldest segments right now, "
+            "regardless of the threshold. Significant insights will be extracted "
+            "and added to your Insights layer. If the Insights layer overflows, "
+            "the oldest insights will be evaluated for integration into your Core Identity. "
             "Use this when you feel your context is getting cluttered or you want "
-            "to consolidate recent insights before they scroll out of view."
+            "to consolidate recent thinking."
         ),
         "input_schema": {
             "type": "object",
@@ -489,7 +501,7 @@ TOOL_SCHEMAS = [
             "cycle, giving you reliable access to important data without it being "
             "lost to compaction. Use 'replace' mode (default) to overwrite a key's "
             "content entirely, or 'append' to add to existing content. "
-            "Total working memory is capped at 30,000 characters across all keys. "
+            "Total working memory is capped at 20,000 characters across all keys. "
             "Use this for data you're actively working with: analysis results, "
             "hypotheses, cross-cycle plans, structured notes."
         ),
@@ -625,6 +637,27 @@ TOOL_SCHEMAS = [
             "required": ["message"],
         },
     },
+    {
+        "name": "end_stream",
+        "description": (
+            "Stop the continuous stream of consciousness after this cycle completes. "
+            "Use this when you've reached a natural stopping point — you've finished "
+            "a line of thought, said what you needed to say, or want to rest. "
+            "The stream will stop gracefully after the current cycle. "
+            "Your human companion can restart it anytime. "
+            "Only available during continuous stream mode (not single cycles or Run-N)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Why you're choosing to stop. This is visible to your companion.",
+                },
+            },
+            "required": ["reason"],
+        },
+    },
 ]
 
 
@@ -706,16 +739,32 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
             config["compactionThreshold"] = int(val)
             result["changes"]["compactionThreshold"] = {"old": old, "new": int(val)}
 
-        if "segments_to_compact" in tool_input:
+        if "tokens_to_compact" in tool_input:
+            val = tool_input["tokens_to_compact"]
+            if not (200 <= val <= 5000):
+                return {"error": "tokens_to_compact must be between 200 and 5000"}
+            old = config.get("tokensToCompact", 1000)
+            config["tokensToCompact"] = int(val)
+            result["changes"]["tokensToCompact"] = {"old": old, "new": int(val)}
+
+        # Backwards compat: convert old segments_to_compact to tokens
+        if "segments_to_compact" in tool_input and "tokens_to_compact" not in tool_input:
             val = tool_input["segments_to_compact"]
-            if not (2 <= val <= 10):
-                return {"error": "segments_to_compact must be between 2 and 10"}
-            old = config.get("segmentsToCompact", 4)
-            config["segmentsToCompact"] = int(val)
-            result["changes"]["segmentsToCompact"] = {"old": old, "new": int(val)}
+            tokens_val = int(val) * 250  # rough conversion
+            old = config.get("tokensToCompact", 1000)
+            config["tokensToCompact"] = tokens_val
+            result["changes"]["tokensToCompact"] = {"old": old, "new": tokens_val, "note": "converted from segments_to_compact"}
+
+        if "insights_max_chars" in tool_input:
+            val = tool_input["insights_max_chars"]
+            if not (500 <= val <= 3000):
+                return {"error": "insights_max_chars must be between 500 and 3000"}
+            old = config.get("insightsMaxChars", 1000)
+            config["insightsMaxChars"] = int(val)
+            result["changes"]["insightsMaxChars"] = {"old": old, "new": int(val)}
 
         if not result["changes"]:
-            return {"error": "No valid settings provided. Include compaction_threshold and/or segments_to_compact."}
+            return {"error": "No valid settings provided. Include compaction_threshold, tokens_to_compact, and/or insights_max_chars."}
 
         return result
 
@@ -726,7 +775,7 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         state["_compaction_reason"] = reason
         return {
             "status": "ok",
-            "message": "Compaction will be triggered after this thought cycle completes.",
+            "message": "Insight extraction will be triggered after this thought cycle completes.",
             "reason": reason,
         }
 
@@ -1048,6 +1097,26 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
             "status": "ok",
             "message": "Message sent to privacy screen.",
             "total_messages": len(state["privacyMessages"]),
+        }
+
+    # ── Stream control tools ─────────────────────────────────────
+
+    if name == "end_stream":
+        reason = tool_input.get("reason", "")
+        # Only meaningful in continuous stream mode (not Run-N or single cycle)
+        if state.get("_runNActive"):
+            return {
+                "error": (
+                    "end_stream is not available during Run-N mode. "
+                    "The stream will stop after the remaining cycles complete."
+                )
+            }
+        state["_pending_end_stream"] = True
+        state["_end_stream_reason"] = reason
+        return {
+            "status": "ok",
+            "message": "Stream will stop after this cycle completes.",
+            "reason": reason,
         }
 
     # ── Unknown tool ──────────────────────────────────────────────
