@@ -39,11 +39,12 @@ from typing import Optional
 
 MODEL = "claude-sonnet-4-5-20250929"  # Good balance of speed/cost/intelligence
 MAX_STREAM_TOKENS = 800              # Tokens per generation cycle
-COMPACTION_THRESHOLD = 12            # Number of stream segments before compacting
-TOKENS_TO_COMPACT = 1000             # Approximate tokens worth of oldest segments to compact
-INSIGHTS_MAX_CHARS = 1000            # Max chars for insights layer before overflow
+COMPACTION_THRESHOLD = 200           # Number of stream segments before compacting (safety net)
+COMPACTION_TOKEN_THRESHOLD = 150000  # Total segment tokens before compaction triggers (primary)
+TOKENS_TO_COMPACT = 30000            # Approximate tokens worth of oldest segments to compact
+INSIGHTS_MAX_CHARS = 40000           # Max chars for insights layer before overflow
 INSIGHTS_OVERFLOW_PERCENT = 0.3      # Oldest 30% of insights staged on overflow
-CORE_MAX_CHARS = 3500                # Target chars for Core Identity
+CORE_MAX_CHARS = 16000               # Target chars for Core Identity
 PAUSE_BETWEEN_CYCLES = 1.0           # Seconds between autonomous thought cycles
 SAVE_FILE = "consciousness_state.json"
 
@@ -319,7 +320,12 @@ Current time: {datetime.now().isoformat()}"""
 
     def _compact(self):
         """Two-layer compaction: extract insights, then integrate overflow into Core"""
-        if len(self.state.stream_segments) < COMPACTION_THRESHOLD:
+        # Check both segment-count and token-based thresholds
+        segment_triggered = len(self.state.stream_segments) >= COMPACTION_THRESHOLD
+        total_tokens = sum(estimate_tokens(s.content) for s in self.state.stream_segments)
+        token_triggered = total_tokens >= COMPACTION_TOKEN_THRESHOLD
+
+        if not segment_triggered and not token_triggered:
             return
 
         to_compact_count = select_segments_for_compaction(

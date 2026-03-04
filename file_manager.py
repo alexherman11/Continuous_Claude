@@ -17,15 +17,16 @@ from datetime import datetime
 DEFAULT_CONFIG = {
     "maxTokens": 600,
     "pauseBetweenCycles": 3000,
-    "compactionThreshold": 8,
-    "tokensToCompact": 1000,
-    "insightsMaxChars": 1000,
+    "compactionThreshold": 200,
+    "tokensToCompact": 30000,
+    "insightsMaxChars": 40000,
     "insightsOverflowPercent": 0.3,
-    "coreMaxChars": 3500,
+    "coreMaxChars": 16000,
     "temperature": 0.9,
+    "compactionTokenThreshold": 150000,
 }
 
-WORKING_MEMORY_LIMIT = 20000
+WORKING_MEMORY_LIMIT = 120000
 
 DEFAULT_STATE = {
     "memoryCore": "",           # Core Identity (stable, changes slowly)
@@ -104,7 +105,7 @@ class FileManager:
                 config["tokensToCompact"] = DEFAULT_CONFIG["tokensToCompact"]
             del config["segmentsToCompact"]
         # Backfill new config keys
-        for key in ("tokensToCompact", "insightsMaxChars", "insightsOverflowPercent", "coreMaxChars"):
+        for key in ("tokensToCompact", "insightsMaxChars", "insightsOverflowPercent", "coreMaxChars", "compactionTokenThreshold"):
             if key not in config:
                 config[key] = DEFAULT_CONFIG[key]
         # Seed Core Identity if empty (migration from old state)

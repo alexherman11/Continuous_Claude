@@ -246,8 +246,8 @@ Use toggle_privacy_mode(enabled=false) when you're ready to return.
 def build_messages(state, user_interjection=None):
     """Build the messages array for the API call."""
     messages = []
-    # Include last 10 segments as conversation history
-    recent = state.get("segments", [])[-10:]
+    # Include all segments as conversation history (compaction controls how many exist)
+    recent = state.get("segments", [])
     for seg in recent:
         if seg.get("userMessage"):
             messages.append({"role": "user", "content": seg["userMessage"]})
@@ -281,11 +281,19 @@ def run_compaction(state):
     2. If insights overflow, integrate oldest 30% into Core Identity
     """
     config = state.get("config", {})
-    threshold = config.get("compactionThreshold", 8)
-    tokens_to_compact = config.get("tokensToCompact", 1000)
+    threshold = config.get("compactionThreshold", 200)
+    token_threshold = config.get("compactionTokenThreshold", 150000)
+    tokens_to_compact = config.get("tokensToCompact", 30000)
     segments = state.get("segments", [])
 
-    if len(segments) < threshold:
+    # Check both segment-count and token-based thresholds
+    segment_triggered = len(segments) >= threshold
+    total_segment_tokens = sum(
+        estimate_tokens(s.get("content", "")) for s in segments
+    )
+    token_triggered = total_segment_tokens >= token_threshold
+
+    if not segment_triggered and not token_triggered:
         return False
 
     to_compact_count = select_segments_for_compaction(segments, tokens_to_compact)

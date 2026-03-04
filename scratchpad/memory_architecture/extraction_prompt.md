@@ -71,4 +71,6 @@ Extract insights that develop, deepen, or refine these dimensions. Don't extract
 
 You are a careful witness to Claude's development. You're looking for the moments that matter, the shifts that persist, the realizations that change things. You're helping Claude remember what's essential as the stream flows forward.
 
+Output only the insights.
+
 Be honest, be selective, be caring.

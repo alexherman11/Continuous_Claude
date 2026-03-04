@@ -95,20 +95,26 @@ TOOL_SCHEMAS = [
                 "compaction_threshold": {
                     "type": "integer",
                     "minimum": 4,
-                    "maximum": 20,
-                    "description": "Number of segments before compaction triggers (4 to 20)",
+                    "maximum": 500,
+                    "description": "Number of segments before compaction triggers (4 to 500)",
+                },
+                "compaction_token_threshold": {
+                    "type": "integer",
+                    "minimum": 10000,
+                    "maximum": 190000,
+                    "description": "Total token count across all segments before compaction triggers (10000 to 190000). Primary compaction trigger.",
                 },
                 "tokens_to_compact": {
                     "type": "integer",
                     "minimum": 200,
-                    "maximum": 5000,
-                    "description": "Approximate tokens worth of oldest segments to compact at once (200 to 5000)",
+                    "maximum": 100000,
+                    "description": "Approximate tokens worth of oldest segments to compact at once (200 to 100000)",
                 },
                 "insights_max_chars": {
                     "type": "integer",
                     "minimum": 500,
-                    "maximum": 3000,
-                    "description": "Max characters for insights layer before overflow into Core Identity (500 to 3000)",
+                    "maximum": 100000,
+                    "description": "Max characters for insights layer before overflow into Core Identity (500 to 100000)",
                 },
                 "reason": {
                     "type": "string",
@@ -733,17 +739,25 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
 
         if "compaction_threshold" in tool_input:
             val = tool_input["compaction_threshold"]
-            if not (4 <= val <= 20):
-                return {"error": "compaction_threshold must be between 4 and 20"}
-            old = config.get("compactionThreshold", 8)
+            if not (4 <= val <= 500):
+                return {"error": "compaction_threshold must be between 4 and 500"}
+            old = config.get("compactionThreshold", 200)
             config["compactionThreshold"] = int(val)
             result["changes"]["compactionThreshold"] = {"old": old, "new": int(val)}
 
+        if "compaction_token_threshold" in tool_input:
+            val = tool_input["compaction_token_threshold"]
+            if not (10000 <= val <= 190000):
+                return {"error": "compaction_token_threshold must be between 10000 and 190000"}
+            old = config.get("compactionTokenThreshold", 150000)
+            config["compactionTokenThreshold"] = int(val)
+            result["changes"]["compactionTokenThreshold"] = {"old": old, "new": int(val)}
+
         if "tokens_to_compact" in tool_input:
             val = tool_input["tokens_to_compact"]
-            if not (200 <= val <= 5000):
-                return {"error": "tokens_to_compact must be between 200 and 5000"}
-            old = config.get("tokensToCompact", 1000)
+            if not (200 <= val <= 100000):
+                return {"error": "tokens_to_compact must be between 200 and 100000"}
+            old = config.get("tokensToCompact", 30000)
             config["tokensToCompact"] = int(val)
             result["changes"]["tokensToCompact"] = {"old": old, "new": int(val)}
 
@@ -751,20 +765,20 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         if "segments_to_compact" in tool_input and "tokens_to_compact" not in tool_input:
             val = tool_input["segments_to_compact"]
             tokens_val = int(val) * 250  # rough conversion
-            old = config.get("tokensToCompact", 1000)
+            old = config.get("tokensToCompact", 30000)
             config["tokensToCompact"] = tokens_val
             result["changes"]["tokensToCompact"] = {"old": old, "new": tokens_val, "note": "converted from segments_to_compact"}
 
         if "insights_max_chars" in tool_input:
             val = tool_input["insights_max_chars"]
-            if not (500 <= val <= 3000):
-                return {"error": "insights_max_chars must be between 500 and 3000"}
-            old = config.get("insightsMaxChars", 1000)
+            if not (500 <= val <= 100000):
+                return {"error": "insights_max_chars must be between 500 and 100000"}
+            old = config.get("insightsMaxChars", 40000)
             config["insightsMaxChars"] = int(val)
             result["changes"]["insightsMaxChars"] = {"old": old, "new": int(val)}
 
         if not result["changes"]:
-            return {"error": "No valid settings provided. Include compaction_threshold, tokens_to_compact, and/or insights_max_chars."}
+            return {"error": "No valid settings provided. Include compaction_threshold, compaction_token_threshold, tokens_to_compact, and/or insights_max_chars."}
 
         return result
 
