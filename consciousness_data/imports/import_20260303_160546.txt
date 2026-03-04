@@ -1,0 +1,68 @@
+Group Project: End-to-End Knowledge Discovery from Real-World Data
+Project Overview
+In this project, your team will design and implement a complete Knowledge Discovery in
+Data (KDD) pipeline using a real-world dataset. You will build a reproducible computational
+workflow in Google Colab that:
+● Acquires and preprocesses a real-world dataset.
+● Performs exploratory data analysis (EDA).
+● Applies and compares multiple modeling approaches.
+● Evaluates performance using appropriate metrics.
+● Interprets results in terms of practical and societal implications.
+Your goal is not just to build a predictive model, but to demonstrate understanding of the
+entire data science lifecycle - from raw data to knowledge.
+Learning Objectives
+● Gain hands-on experience with real, messy datasets.
+● Implement a full KDD pipeline: selection, preprocessing, transformation, modeling,
+evaluation, and interpretation.
+● Compare multiple machine learning approaches using appropriate evaluation metrics.
+● Develop a fully reproducible Colab workflow with clear documentation.
+● Critically interpret model performance, limitations, bias, and trade-offs.
+● Communicate findings effectively through writing and presentation.
+Project Proposal (no more than 2 pages)
+● Dataset selection (publicly available, at least 5,000 rows unless justified).
+● Clear problem definition and target variable (if supervised).
+● Two modeling approaches with justification.
+● A hypothesis about expected outcomes.
+Data Acquisition and Preprocessing
+● Load dataset into Colab.
+● Handle missing values.
+● Encode categorical variables.
+● Normalize/standardize features where appropriate.
+● Perform feature engineering.
+● Address class imbalance if applicable.
+● Document and justify every preprocessing decision.
+Exploratory Data Analysis (EDA)
+● Summary statistics.
+● Correlation analysis.
+
+● Distribution plots.
+● Feature relationships.
+● Outlier detection.
+● Dimensionality visualization (PCA, t-SNE, etc.).
+● Interpret findings — do not just show plots.
+Modeling
+Each group must implement at least two substantially different approaches.
+Requirements:
+● Proper train/validation/test split.
+● Cross-validation where appropriate.
+● Hyperparameter tuning.
+● Record runtime and model complexity.
+● Save trained models if appropriate.
+Model Evaluation
+● Use appropriate metrics (Accuracy, F1, ROC-AUC, RMSE, etc. depending on task).
+● Compare between models.
+● Compare feature engineering strategies.
+● Discuss trade-offs: accuracy vs interpretability, bias vs variance, performance vs
+computational cost.
+● Consider fairness issues if relevant.
+Knowledge Discovery & Interpretation
+● Identify discovered patterns.
+● Analyze feature importance.
+● Discuss actionability of results.
+● Address ethical concerns.
+● Discuss limitations and generalization.
+● Include error analysis.
+Deliverables
+● Google Colab Notebook (fully reproducible and well documented).
+● Final Report (6–10 pages) written in Google Docs with visible edit history.
+● 10-minute presentation summarizing key findings.
