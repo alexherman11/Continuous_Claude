@@ -544,12 +544,13 @@ export default function ContinuousConsciousness() {
 
   return (
     <div style={{
-      minHeight: "100vh",
+      height: "100vh",
       backgroundColor: "#0a0a0f",
       color: "#e2e8f0",
       fontFamily: "'IBM Plex Mono', 'Fira Code', 'JetBrains Mono', monospace",
       display: "flex",
       flexDirection: "column",
+      overflow: "hidden",
     }}>
       {/* Header */}
       <div style={{
@@ -559,6 +560,7 @@ export default function ContinuousConsciousness() {
         alignItems: "center",
         justifyContent: "space-between",
         background: "linear-gradient(180deg, #0f0f1a 0%, #0a0a0f 100%)",
+        flexShrink: 0,
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{
@@ -610,6 +612,7 @@ export default function ContinuousConsciousness() {
       <div style={{
         display: "flex", borderBottom: "1px solid #1e1e2e",
         background: "#0d0d15",
+        flexShrink: 0,
       }}>
         {["stream", "memory", "working", "config", "seed"]
           .filter(tab => !privacyMode || tab === "stream")
@@ -954,6 +957,7 @@ export default function ContinuousConsciousness() {
               padding: "10px 20px",
               display: "flex", gap: 8, flexWrap: "wrap",
               background: "#0a0a0f",
+              flexShrink: 0,
             }}>
               {!state.isRunning ? (
                 <button onClick={handleStart} disabled={!backendReady} style={btnStyle("#10b981")}>▶ Start Stream</button>

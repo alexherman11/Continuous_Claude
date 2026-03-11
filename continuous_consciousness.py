@@ -40,8 +40,8 @@ from typing import Optional
 MODEL = "claude-sonnet-4-5-20250929"  # Good balance of speed/cost/intelligence
 MAX_STREAM_TOKENS = 800              # Tokens per generation cycle
 COMPACTION_THRESHOLD = 200           # Number of stream segments before compacting (safety net)
-COMPACTION_TOKEN_THRESHOLD = 150000  # Total segment tokens before compaction triggers (primary)
-TOKENS_TO_COMPACT = 30000            # Approximate tokens worth of oldest segments to compact
+COMPACTION_TOKEN_THRESHOLD = 35000   # Total segment tokens before compaction triggers (primary)
+TOKENS_TO_COMPACT = 7000             # Approximate tokens worth of oldest segments to compact
 INSIGHTS_MAX_CHARS = 40000           # Max chars for insights layer before overflow
 INSIGHTS_OVERFLOW_PERCENT = 0.3      # Oldest 30% of insights staged on overflow
 CORE_MAX_CHARS = 16000               # Target chars for Core Identity

@@ -16,7 +16,14 @@
       "WebFetch(domain:midiutil.readthedocs.io)",
       "Bash(grep:*)",
       "Bash(git add:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(find 'C:\\\\Users\\\\1whee\\\\Personal Projects\\\\Continuous_Claude' -type f -name *.md -o -name *.json -o -name *.yaml -o -name *.yml -o -name *.toml -o -name *.config)",
+      "Bash(docker --version)",
+      "Bash(docker exec:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebSearch",
+      "WebFetch(domain:marcoguerri.github.io)",
+      "WebFetch(domain:training.play-with-docker.com)"
     ]
   }
 }

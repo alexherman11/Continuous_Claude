@@ -28,7 +28,7 @@ from pdf_importer import (
     parse_conversation_and_core,
     parse_memory_core_only,
 )
-from tool_definitions import TOOL_SCHEMAS, execute_tool, MAX_TOOL_CALLS_PER_CYCLE
+from tool_definitions import TOOL_SCHEMAS, execute_tool, MAX_TOOL_CALLS_PER_CYCLE, build_tools_with_search
 
 # ── Setup ─────────────────────────────────────────────────────────────
 
@@ -53,14 +53,14 @@ def log_api_call(cycle_num, call_num, request_info, response, config):
             f.write(f"\n── REQUEST ──\n")
             f.write(f"  model: {MODEL}\n")
             f.write(f"  max_tokens: {config.get('maxTokens', 600)}\n")
-            f.write(f"  temperature: {config.get('temperature', 0.9)}\n")
+            f.write(f"  temperature: {request_info.get('temperature', config.get('temperature', 0.9))}\n")
             f.write(f"  tool_choice: {request_info.get('tool_choice')}\n")
             f.write(f"  system_prompt_chars: {request_info.get('system_chars', '?')}\n")
             f.write(f"  system_prompt_est_tokens: {request_info.get('system_tokens_est', '?')}\n")
             f.write(f"  num_messages: {request_info.get('num_messages', '?')}\n")
             f.write(f"  messages_chars: {request_info.get('messages_chars', '?')}\n")
             f.write(f"  messages_est_tokens: {request_info.get('messages_tokens_est', '?')}\n")
-            f.write(f"  num_tools: {len(TOOL_SCHEMAS)}\n")
+            f.write(f"  num_tools: {request_info.get('num_tools', len(TOOL_SCHEMAS))}\n")
             f.write(f"  tool_schemas_chars: {request_info.get('tool_schemas_chars', '?')}\n")
 
             # Response info
@@ -284,9 +284,15 @@ def build_messages(state, user_interjection=None):
         " Cycles {compacted} were just compacted. Significant insights were extracted to your Insights layer. All compacted thoughts are preserved in the searchable archive — nothing is lost.",
     )
 
-    # Include all segments as conversation history (compaction controls how many exist)
+    # Include all segments as conversation history (compaction controls how many exist).
+    # Observation masking: older segments get their content truncated to save context
+    # while preserving tool action summaries. Research shows this is 52% cheaper than
+    # full summarization and matches its effectiveness.
     recent = state.get("segments", [])
-    for seg in recent:
+    RECENT_FULL_COUNT = 5  # Keep this many most-recent segments at full fidelity
+    mask_cutoff = max(0, len(recent) - RECENT_FULL_COUNT)
+
+    for i, seg in enumerate(recent):
         if seg.get("userMessage"):
             messages.append({"role": "user", "content": seg["userMessage"]})
         else:
@@ -294,7 +300,17 @@ def build_messages(state, user_interjection=None):
                 "role": "user",
                 "content": seg_tpl.format(cycle=seg["cycle"]),
             })
-        messages.append({"role": "assistant", "content": seg["content"]})
+
+        content = seg["content"]
+        # Mask older segments: truncate content, summarize tool actions
+        if i < mask_cutoff and len(content) > 600:
+            masked = content[:500] + "\n[...truncated...]"
+            if seg.get("toolActions"):
+                tool_summary = ", ".join(a["tool"] for a in seg["toolActions"])
+                masked += f"\n[Tools used: {tool_summary}]"
+            content = masked
+
+        messages.append({"role": "assistant", "content": content})
 
     # Add the current prompt
     if user_interjection:
@@ -495,6 +511,11 @@ def run_cycle_internal(state, user_message=None):
     tool_actions = []
     tool_call_count = 0
 
+    # Build tools list with deferred loading + tool search.
+    # Always-loaded tools (~1.5K tokens) are sent in full.
+    # Deferred tools (~4.5K tokens saved) are discovered via Tool Search.
+    tools_list = build_tools_with_search()
+
     # ── Tool use loop ─────────────────────────────────────────────
     # First call uses "auto" so Claude generates text naturally.
     # Subsequent calls (after tool results) use "any" to prevent the
@@ -508,13 +529,19 @@ def run_cycle_internal(state, user_message=None):
         api_call_num += 1
         tool_choice = {"type": "auto"} if first_call else {"type": "any"}
 
+        # Split temperature: use configured temp for creative thought (first call),
+        # low temp for tool continuations to maximize tool-call accuracy.
+        # Research shows up to 10% accuracy improvement at temp 0.0-0.2 for structured output.
+        temp = config.get("temperature", 0.9) if first_call else 0.1
+
         # Pre-call metrics for logging
         system_chars = len(system)
         messages_str = json.dumps(messages)
         messages_chars = len(messages_str)
-        tool_schemas_str = json.dumps(TOOL_SCHEMAS)
+        tool_schemas_str = json.dumps(tools_list, default=str)
         request_info = {
             "tool_choice": tool_choice,
+            "temperature": temp,
             "system_chars": system_chars,
             "system_tokens_est": system_chars // 4,
             "num_messages": len(messages),
@@ -523,14 +550,30 @@ def run_cycle_internal(state, user_message=None):
             "tool_schemas_chars": len(tool_schemas_str),
         }
 
-        response = client.messages.create(
+        response = client.beta.messages.create(
             model=MODEL,
             max_tokens=config.get("maxTokens", 600),
-            temperature=config.get("temperature", 0.9),
+            temperature=temp,
             system=system,
             messages=messages,
-            tools=TOOL_SCHEMAS,
+            tools=tools_list,
             tool_choice=tool_choice,
+            betas=["context-management-2025-06-27", "tool-search-2025-04-15"],
+            # Automatically clear old tool results when context grows large.
+            # Keeps last 3 tool results, excludes working memory tools (state-critical).
+            # Research: 29% performance boost, 84% token reduction in long sessions.
+            context_management={
+                "edits": [{
+                    "type": "clear_tool_uses_20250919",
+                    "trigger": {"type": "token_count", "token_count": 25000},
+                    "keep": {"type": "last_n", "n": 3},
+                    "exclude_tools": [
+                        "write_working_memory",
+                        "read_working_memory",
+                        "working_memory_status",
+                    ],
+                }]
+            },
         )
         first_call = False
 
@@ -618,10 +661,21 @@ def run_cycle_internal(state, user_message=None):
                 "input": block.input,
                 "result": result,
             })
+            # Truncate large tool results before adding to context.
+            # The agent can re-read files if needed — this is "reversible compaction".
+            result_str = json.dumps(result)
+            if len(result_str) > 3000:
+                truncated_result = {
+                    "truncated": True,
+                    "preview": result_str[:1500],
+                    "full_length_chars": len(result_str),
+                    "note": "Result truncated to save context. Use read_file to see full content if needed.",
+                }
+                result_str = json.dumps(truncated_result)
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,
-                "content": json.dumps(result),
+                "content": result_str,
             })
 
         # If finish_cycle was called alongside real tools, execute tools then stop

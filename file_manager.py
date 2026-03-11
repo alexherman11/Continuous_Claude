@@ -18,12 +18,12 @@ DEFAULT_CONFIG = {
     "maxTokens": 600,
     "pauseBetweenCycles": 3000,
     "compactionThreshold": 200,
-    "tokensToCompact": 30000,
+    "tokensToCompact": 7000,
     "insightsMaxChars": 40000,
     "insightsOverflowPercent": 0.3,
     "coreMaxChars": 16000,
     "temperature": 0.9,
-    "compactionTokenThreshold": 150000,
+    "compactionTokenThreshold": 35000,
 }
 
 WORKING_MEMORY_LIMIT = 120000

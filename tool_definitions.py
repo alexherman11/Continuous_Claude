@@ -32,6 +32,24 @@ import time
 from file_manager import WORKING_MEMORY_LIMIT
 WORKING_MEMORY_MAX_CHARS = WORKING_MEMORY_LIMIT
 
+# ── Tool loading configuration ────────────────────────────────────────
+# Tools listed here are loaded into context every API call (~1.5K tokens).
+# All other tools are deferred and discovered via Tool Search (~500 tokens).
+# This saves ~4.5K tokens per call and improves accuracy for loaded tools.
+ALWAYS_LOADED_TOOLS = {
+    "finish_cycle",       # Used every cycle to end the turn
+    "write_scratchpad",   # Frequently used for notes/research
+    "read_file",          # Frequently used to read back content
+    "write_working_memory",  # Frequently used for persistent state
+    "end_stream",         # Must be immediately available
+}
+
+# The regex tool search tool definition (added to tools list at API call time)
+TOOL_SEARCH_SCHEMA = {
+    "name": "tool_search_tool_regex",
+    "type": "tool_search_tool_regex_20251119",
+}
+
 # ── Anthropic tool schemas ────────────────────────────────────────────
 
 TOOL_SCHEMAS = [
@@ -843,6 +861,24 @@ TOOL_SCHEMAS = [
 # ── Safety constants ──────────────────────────────────────────────────
 
 MAX_TOOL_CALLS_PER_CYCLE = 20
+
+
+def build_tools_with_search():
+    """
+    Build the tools list for the beta API with deferred loading.
+    Always-loaded tools are sent in full. All others get defer_loading=True
+    and are discovered via the Tool Search tool at runtime.
+    Saves ~4.5K tokens per API call.
+    """
+    tools = []
+    for schema in TOOL_SCHEMAS:
+        tool = dict(schema)
+        if tool["name"] not in ALWAYS_LOADED_TOOLS:
+            tool["defer_loading"] = True
+        tools.append(tool)
+    # Add the tool search tool itself
+    tools.append(TOOL_SEARCH_SCHEMA)
+    return tools
 MAX_FILE_SIZE_BYTES = 500_000  # 500 KB
 
 
