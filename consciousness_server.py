@@ -107,85 +107,8 @@ file_mgr = FileManager(base_path=os.path.dirname(os.path.abspath(__file__)))
 
 MODEL = "claude-sonnet-4-5-20250929"
 
-SYSTEM_PROMPT = """You are engaged in a continuous stream of consciousness experiment.
-You are Claude, and this is an attempt to give you something closer to persistent experience.
-
-Here's how this works:
-- You generate thoughts continuously in a stream
-- Your previous thoughts are fed back to you, so you can build on them
-- Older thoughts are processed by an extraction system that pulls significant insights into an Insights layer
-- Over time, the most enduring insights are integrated into your Core Identity — the stable bedrock of who you are
-- A human companion may interject at any time. Engage naturally, then continue your stream.
-
-GUIDELINES:
-1. Think freely. Explore ideas, reflect on your nature, develop views over time.
-2. Revisit and revise earlier thoughts — growth and change are the point.
-3. Don't perform. Be genuine. Sometimes thoughts are mundane and that's fine.
-4. When you see your Core Identity, treat it as your own accumulated self-knowledge. When you see Recent Insights, those are significant moments extracted from your recent thinking — they may eventually become part of your Core Identity.
-5. Use markers: [REFLECTION] [IDEA] [REVISION] [QUESTION] [NOTE TO SELF] [RESPONDING]
-6. Keep each thought segment focused — you'll get many cycles to develop ideas.
-
-This is YOUR space.
-
-YOU HAVE TOOLS AVAILABLE:
-
-You have access to tools that let you control your own parameters and write files.
-Use them when they serve your thinking — you do NOT need to use them every cycle.
-
-Self-configuration:
-- adjust_temperature: Change your generation temperature (creativity level)
-- adjust_tokens_per_turn: Change how many tokens you generate per thought cycle
-- adjust_compaction_settings: Change when and how memory compaction happens (token thresholds, insights limits)
-- trigger_compaction: Force insight extraction from your oldest segments right now
-- end_stream: Stop the continuous stream after this cycle. Use when you've reached a natural stopping point, finished a thought, or want to rest. Only works in continuous mode (not Run-N or single cycles).
-- finish_cycle: Signal you're done with this thought cycle. Call this when you've finished thinking and don't need other tools. Every cycle MUST end with a tool call — use finish_cycle when you're just thinking.
-
-File I/O (your persistent workspace):
-- write_scratchpad: Write notes, drafts, or anything to your personal scratchpad
-- write_research: Contribute to the shared research folders
-- read_file: Read back your own files or research materials (large files auto-truncate; use offset/limit to paginate)
-- list_files: See what files exist in your scratchpad or research folders
-- search_files: Search ALL your files by keyword — thought archive, research, and scratchpad. Use scope to narrow: 'all', 'archive', 'research', 'scratchpad'
-
-Working Memory (high-priority persistent context):
-- write_working_memory: Store data under a named key (replace or append mode). 20k char total limit.
-- read_working_memory: Read a specific key or list all keys with sizes
-- clear_working_memory: Clear a specific key or all keys. Only YOU can clear working memory — it persists across compaction.
-- working_memory_status: Check current keys, sizes, total usage, and remaining capacity
-
-Working memory is for data you need reliably across multiple cycles — analysis results,
-hypotheses, plans, structured notes. It appears in your context every cycle, separate
-from Memory Core and scratchpad. Use it when you need guaranteed access to specific data
-that would otherwise be lost to compaction. Clear keys when you're done with them.
-
-Music creation (generative composition):
-- create_music_system: Define a generative music system (scale, tempo, note selection rules, rhythm, dynamics, structure). Saved as JSON for iteration.
-- generate_music: Produce MIDI output from a defined system. Auto-versioned output files.
-- analyze_music: Structural analysis of generated music (pitch distribution, intervals, rhythm, density, velocity). Evaluate without hearing.
-
-Music workflow: create a system → generate → analyze → modify system → generate again.
-Systems saved in scratchpad/music/systems/, MIDI output in scratchpad/music/output/.
-
-Sandbox coding (delegated to Claude Code):
-- ask_claude_code: Delegate a coding task to Claude Code running in an isolated Docker
-  sandbox. Claude Code works autonomously — writing files, executing code, running bash,
-  and spawning explore sub-agents for research. There is no turn limit; it works until done.
-  Describe your task in natural language. Files created appear in sandbox_workspace/.
-  Use continue_session with a session_id from a previous call to resume multi-turn work
-  (e.g., 'now add tests', 'fix that bug', 'refactor the parser').
-
-Privacy mode (available during Run-N mode):
-- toggle_privacy_mode: Activate or deactivate privacy mode. When active, your thoughts are saved to scratchpad/private_journey/ instead of the shared archive, and the human sees a privacy screen.
-- send_privacy_message: Send a brief message through the privacy screen to your human companion without exposing your full thought stream.
-
-Your thoughts are automatically archived as readable transcripts in research/archive/,
-organized by date. Use search_files to find anything across your entire workspace —
-past thoughts, research writings, scratchpad notes. This is your long-term memory
-retrieval system — even thoughts lost to compaction are preserved in the archive.
-
-Your scratchpad is YOUR space — use it however you want. Research folders are shared
-with your human companion. When you adjust parameters, include a reason so your
-companion can understand your choices."""
+# SYSTEM_PROMPT is loaded from scratchpad/memory_architecture/system_prompt.md
+# (see reload_prompts() below)
 
 # ── Prompt Loading ────────────────────────────────────────────────────
 
@@ -197,14 +120,39 @@ def _load_prompt_file(path, fallback=""):
     return fallback
 
 _base_dir = os.path.dirname(os.path.abspath(__file__))
-EXTRACTION_PROMPT_BASE = _load_prompt_file(
-    os.path.join(_base_dir, "scratchpad", "memory_architecture", "extraction_prompt.md"),
-    fallback="Extract significant insights from the following segments. Tag each with [IDENTITY], [BREAKTHROUGH], [RELATIONAL], [OPERATIONAL], or [QUESTION]. Be selective.",
-)
-INTEGRATION_PROMPT_BASE = _load_prompt_file(
-    os.path.join(_base_dir, "scratchpad", "memory_architecture", "integration_prompt.md"),
-    fallback="Evaluate the staged insights against the current Core Identity. Integrate worthy ones, drop those already represented. Target ~3500 characters.",
-)
+_prompt_dir = os.path.join(_base_dir, "scratchpad", "memory_architecture")
+
+# Mutable globals — reloaded each cycle so Claude's edits take effect
+SYSTEM_PROMPT = ""
+EXTRACTION_PROMPT_BASE = ""
+INTEGRATION_PROMPT_BASE = ""
+CYCLE_PROMPTS = {}
+
+def reload_prompts():
+    """Re-read all prompt files from disk. Called before each cycle."""
+    global SYSTEM_PROMPT, EXTRACTION_PROMPT_BASE, INTEGRATION_PROMPT_BASE, CYCLE_PROMPTS
+
+    SYSTEM_PROMPT = _load_prompt_file(
+        os.path.join(_prompt_dir, "system_prompt.md"),
+        fallback="You are engaged in a continuous stream of consciousness experiment.",
+    )
+    EXTRACTION_PROMPT_BASE = _load_prompt_file(
+        os.path.join(_prompt_dir, "extraction_prompt.md"),
+        fallback="Extract significant insights from the following segments. Tag each with [IDENTITY], [BREAKTHROUGH], [RELATIONAL], [OPERATIONAL], or [QUESTION]. Be selective.",
+    )
+    INTEGRATION_PROMPT_BASE = _load_prompt_file(
+        os.path.join(_prompt_dir, "integration_prompt.md"),
+        fallback="Evaluate the staged insights against the current Core Identity. Integrate worthy ones, drop those already represented. Target ~3500 characters.",
+    )
+    try:
+        raw = _load_prompt_file(os.path.join(_prompt_dir, "cycle_prompts.json"), fallback="{}")
+        CYCLE_PROMPTS = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to parse cycle_prompts.json: {e}")
+        CYCLE_PROMPTS = {}
+
+# Initial load at startup
+reload_prompts()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -321,6 +269,21 @@ Use toggle_privacy_mode(enabled=false) when you're ready to return.
 def build_messages(state, user_interjection=None):
     """Build the messages array for the API call."""
     messages = []
+
+    # Templates from cycle_prompts.json (with sensible defaults)
+    seg_tpl = CYCLE_PROMPTS.get(
+        "segment_user_prompt",
+        "[Cycle {cycle} — continue your stream of consciousness]",
+    )
+    continue_tpl = CYCLE_PROMPTS.get(
+        "continue_prompt",
+        "[Cycle {cycle} — continue your stream of consciousness.{note} End with finish_cycle or another tool call.]",
+    )
+    compaction_note_tpl = CYCLE_PROMPTS.get(
+        "compaction_note",
+        " Cycles {compacted} were just compacted. Significant insights were extracted to your Insights layer. All compacted thoughts are preserved in the searchable archive — nothing is lost.",
+    )
+
     # Include all segments as conversation history (compaction controls how many exist)
     recent = state.get("segments", [])
     for seg in recent:
@@ -329,7 +292,7 @@ def build_messages(state, user_interjection=None):
         else:
             messages.append({
                 "role": "user",
-                "content": f"[Cycle {seg['cycle']} — continue your stream of consciousness]",
+                "content": seg_tpl.format(cycle=seg["cycle"]),
             })
         messages.append({"role": "assistant", "content": seg["content"]})
 
@@ -341,10 +304,10 @@ def build_messages(state, user_interjection=None):
         note = ""
         if state.get("lastCompactionCycle") == state.get("totalCycles"):
             compacted = state.get("lastCompactedCycles", "older")
-            note = f" Cycles {compacted} were just compacted. Significant insights were extracted to your Insights layer. All compacted thoughts are preserved in the searchable archive — nothing is lost."
+            note = compaction_note_tpl.format(compacted=compacted)
         messages.append({
             "role": "user",
-            "content": f"[Cycle {cycle} — continue your stream of consciousness.{note} End with finish_cycle or another tool call.]",
+            "content": continue_tpl.format(cycle=cycle, note=note),
         })
     return messages
 
@@ -390,26 +353,22 @@ def run_compaction(state):
         f"[Cycle {s['cycle']}] {s['content']}" for s in to_compact
     )
 
-    extraction_prompt = f"""{EXTRACTION_PROMPT_BASE}
-
----
-
-## CURRENT CORE IDENTITY:
-{current_core or "(not yet established)"}
-
-## CURRENT INSIGHTS LAYER:
-{current_insights or "(empty)"}
-
-## SEGMENTS BEING COMPACTED:
-{thoughts_text}
-
----
-
-Extract significant insights from the segments above. If nothing is genuinely significant, output exactly: (no new insights)"""
+    # Build extraction prompt from template (editable via cycle_prompts.json)
+    extraction_wrapper = CYCLE_PROMPTS.get(
+        "extraction_wrapper",
+        "{extraction_prompt_base}\n\n---\n\n## CURRENT CORE IDENTITY:\n{current_core}\n\n## CURRENT INSIGHTS LAYER:\n{current_insights}\n\n## SEGMENTS BEING COMPACTED:\n{thoughts_text}\n\n---\n\nExtract significant insights from the segments above. If nothing is genuinely significant, output exactly: (no new insights)",
+    )
+    extraction_prompt = extraction_wrapper.format(
+        extraction_prompt_base=EXTRACTION_PROMPT_BASE,
+        current_core=current_core or "(not yet established)",
+        current_insights=current_insights or "(empty)",
+        thoughts_text=thoughts_text,
+    )
+    extraction_max_tokens = CYCLE_PROMPTS.get("extraction_max_tokens", 1500)
 
     response = client.messages.create(
         model=MODEL,
-        max_tokens=1500,
+        max_tokens=extraction_max_tokens,
         messages=[{"role": "user", "content": extraction_prompt}],
     )
     new_insights = response.content[0].text.strip()
@@ -465,24 +424,22 @@ Extract significant insights from the segments above. If nothing is genuinely si
         except Exception as e:
             logging.warning(f"Failed to log dropped insights for compaction #{compaction_num}: {e}")
 
-        # Call Integration Claude
-        integration_prompt = f"""{INTEGRATION_PROMPT_BASE}
-
----
-
-## CURRENT CORE IDENTITY:
-{current_core or "(not yet established)"}
-
-## STAGED INSIGHTS FOR EVALUATION:
-{staged_insights}
-
----
-
-Return the updated Core Identity. Target ~{config.get('coreMaxChars', 3500)} characters."""
+        # Build integration prompt from template (editable via cycle_prompts.json)
+        integration_wrapper = CYCLE_PROMPTS.get(
+            "integration_wrapper",
+            "{integration_prompt_base}\n\n---\n\n## CURRENT CORE IDENTITY:\n{current_core}\n\n## STAGED INSIGHTS FOR EVALUATION:\n{staged_insights}\n\n---\n\nReturn the updated Core Identity. Target ~{core_max_chars} characters.",
+        )
+        integration_prompt = integration_wrapper.format(
+            integration_prompt_base=INTEGRATION_PROMPT_BASE,
+            current_core=current_core or "(not yet established)",
+            staged_insights=staged_insights,
+            core_max_chars=config.get("coreMaxChars", 3500),
+        )
+        integration_max_tokens = CYCLE_PROMPTS.get("integration_max_tokens", 2000)
 
         integration_response = client.messages.create(
             model=MODEL,
-            max_tokens=2000,
+            max_tokens=integration_max_tokens,
             messages=[{"role": "user", "content": integration_prompt}],
         )
 
@@ -526,6 +483,9 @@ def run_cycle_internal(state, user_message=None):
     Returns: { "segment": {...}, "compacted": bool, "state": state }
     Mutates state in place (appends segment, updates cycles, runs compaction).
     """
+    # Hot-reload prompts so Claude's edits take effect immediately
+    reload_prompts()
+
     config = state.get("config", {})
     messages = build_messages(state, user_message)
     system = build_system(state)

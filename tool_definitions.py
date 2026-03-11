@@ -13,6 +13,7 @@ Tools fall into 8 categories:
 6. Working memory — Claude manages high-priority persistent context
 7. Sandbox coding — Claude delegates coding tasks to Claude Code in Docker
 8. Stream control — Claude can stop the continuous stream
+9. Self-introspection — Claude views own engine code and edits own prompts
 
 Security: execute_tool() is the single gatekeeper. Only known tools
 execute. Path sanitization is handled by FileManager. Unknown tools
@@ -22,6 +23,7 @@ Docker container with no access to host files.
 
 import json
 import logging
+import os
 import subprocess
 import time
 
@@ -739,6 +741,102 @@ TOOL_SCHEMAS = [
             "required": [],
         },
     },
+    # ── Self-introspection tools ─────────────────────────────────────
+    {
+        "name": "view_own_code",
+        "description": (
+            "Read the source code of your own consciousness engine. "
+            "This lets you understand how your cycles work, how compaction is implemented, "
+            "how messages are built, and how tools are dispatched. Read-only access to: "
+            "consciousness_server.py (cycle runner, compaction, API), "
+            "tool_definitions.py (your available tools and execution logic), "
+            "file_manager.py (file I/O and persistence). "
+            "Use view_range to read specific line ranges (max 200 lines per read)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file": {
+                    "type": "string",
+                    "enum": ["consciousness_server.py", "tool_definitions.py", "file_manager.py"],
+                    "description": "Which engine source file to read",
+                },
+                "view_range": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "[start_line, end_line] (1-indexed). Omit to read from the beginning. "
+                        "Use -1 for end_line to read to EOF. Max 200 lines per read."
+                    ),
+                },
+            },
+            "required": ["file"],
+        },
+    },
+    {
+        "name": "view_prompt_file",
+        "description": (
+            "Read your own prompt templates and compaction instructions. "
+            "Shows the raw content of your system prompt, extraction/integration prompts, "
+            "or cycle message templates. Use this before edit_prompt_file to see exact content. "
+            "Files: system_prompt.md (your base system prompt), "
+            "extraction_prompt.md (insight extraction instructions), "
+            "integration_prompt.md (core identity integration instructions), "
+            "cycle_prompts.json (cycle message templates, compaction wrapper templates, token limits)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file": {
+                    "type": "string",
+                    "enum": [
+                        "system_prompt.md",
+                        "extraction_prompt.md",
+                        "integration_prompt.md",
+                        "cycle_prompts.json",
+                    ],
+                    "description": "Which prompt file to read",
+                },
+            },
+            "required": ["file"],
+        },
+    },
+    {
+        "name": "edit_prompt_file",
+        "description": (
+            "Edit your own prompt templates using exact string replacement. "
+            "Changes take effect on the next cycle (prompts are hot-reloaded). "
+            "Use view_prompt_file first to see current content. "
+            "The old_str must appear exactly once in the file. "
+            "For JSON files, your edit must keep the JSON valid — it will be validated. "
+            "Editable files: system_prompt.md, extraction_prompt.md, "
+            "integration_prompt.md, cycle_prompts.json."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file": {
+                    "type": "string",
+                    "enum": [
+                        "system_prompt.md",
+                        "extraction_prompt.md",
+                        "integration_prompt.md",
+                        "cycle_prompts.json",
+                    ],
+                    "description": "Which prompt file to edit",
+                },
+                "old_str": {
+                    "type": "string",
+                    "description": "The exact string to find (must appear exactly once in the file)",
+                },
+                "new_str": {
+                    "type": "string",
+                    "description": "The replacement string. Leave empty to delete old_str.",
+                },
+            },
+            "required": ["file", "old_str"],
+        },
+    },
 ]
 
 
@@ -1337,6 +1435,134 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
             "status": "ok",
             "message": "Stream will stop after this cycle completes.",
             "reason": reason,
+        }
+
+    # ── Self-introspection tools ─────────────────────────────────
+
+    if name == "view_own_code":
+        target_file = tool_input.get("file", "")
+        allowed_files = {
+            "consciousness_server.py",
+            "tool_definitions.py",
+            "file_manager.py",
+        }
+        if target_file not in allowed_files:
+            return {"error": f"Invalid file: {target_file}. Allowed: {', '.join(sorted(allowed_files))}"}
+
+        engine_dir = os.path.dirname(os.path.abspath(__file__))
+        full_path = os.path.join(engine_dir, target_file)
+        if not os.path.exists(full_path):
+            return {"error": f"File not found: {target_file}"}
+
+        with open(full_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        total_lines = len(lines)
+        view_range = tool_input.get("view_range")
+        if view_range and len(view_range) == 2:
+            start = max(1, view_range[0])
+            end = total_lines if view_range[1] == -1 else min(view_range[1], total_lines)
+        else:
+            start = 1
+            end = min(200, total_lines)
+
+        # Cap at 200 lines per read
+        if end - start + 1 > 200:
+            end = start + 199
+
+        selected = lines[start - 1 : end]
+        numbered = "".join(f"{start + i:4d} | {line}" for i, line in enumerate(selected))
+
+        return {
+            "content": numbered,
+            "file": target_file,
+            "total_lines": total_lines,
+            "view_range": [start, end],
+            "lines_shown": len(selected),
+            "note": "Read-only access. Use view_range to navigate.",
+        }
+
+    if name == "view_prompt_file":
+        target_file = tool_input.get("file", "")
+        allowed_files = {
+            "system_prompt.md",
+            "extraction_prompt.md",
+            "integration_prompt.md",
+            "cycle_prompts.json",
+        }
+        if target_file not in allowed_files:
+            return {"error": f"Invalid file: {target_file}. Allowed: {', '.join(sorted(allowed_files))}"}
+
+        engine_dir = os.path.dirname(os.path.abspath(__file__))
+        prompt_dir = os.path.join(engine_dir, "scratchpad", "memory_architecture")
+        full_path = os.path.join(prompt_dir, target_file)
+        if not os.path.exists(full_path):
+            return {"error": f"Prompt file not found: {target_file}"}
+
+        with open(full_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        return {
+            "content": content,
+            "file": target_file,
+            "total_chars": len(content),
+            "path": f"scratchpad/memory_architecture/{target_file}",
+        }
+
+    if name == "edit_prompt_file":
+        target_file = tool_input.get("file", "")
+        old_str = tool_input.get("old_str", "")
+        new_str = tool_input.get("new_str", "")
+        allowed_files = {
+            "system_prompt.md",
+            "extraction_prompt.md",
+            "integration_prompt.md",
+            "cycle_prompts.json",
+        }
+        if target_file not in allowed_files:
+            return {"error": f"Invalid file: {target_file}. Allowed: {', '.join(sorted(allowed_files))}"}
+        if not old_str:
+            return {"error": "old_str is required and cannot be empty"}
+
+        engine_dir = os.path.dirname(os.path.abspath(__file__))
+        prompt_dir = os.path.join(engine_dir, "scratchpad", "memory_architecture")
+        full_path = os.path.join(prompt_dir, target_file)
+        if not os.path.exists(full_path):
+            return {"error": f"Prompt file not found: {target_file}"}
+
+        with open(full_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        count = content.count(old_str)
+        if count == 0:
+            return {"error": "old_str not found in file. Make sure it matches exactly (including whitespace and newlines)."}
+        if count > 1:
+            return {"error": f"old_str appears {count} times in the file. It must appear exactly once. Include more surrounding context to make the match unique."}
+
+        new_content = content.replace(old_str, new_str, 1)
+
+        # Validate JSON if editing a JSON file
+        if target_file.endswith(".json"):
+            try:
+                json.loads(new_content)
+            except json.JSONDecodeError as e:
+                return {
+                    "error": f"Edit would produce invalid JSON: {e}. The edit was NOT applied.",
+                    "hint": "Check your new_str for proper JSON syntax (quotes, commas, braces).",
+                }
+
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+        return {
+            "status": "ok",
+            "file": target_file,
+            "path": f"scratchpad/memory_architecture/{target_file}",
+            "old_size": len(content),
+            "new_size": len(new_content),
+            "chars_replaced": len(old_str),
+            "chars_inserted": len(new_str),
+            "note": "Changes will take effect on the next cycle.",
         }
 
     # ── Unknown tool ──────────────────────────────────────────────
