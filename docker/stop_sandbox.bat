@@ -1,0 +1,6 @@
+@echo off
+echo Stopping code-sandbox...
+docker stop code-sandbox
+echo Removing container...
+docker rm code-sandbox
+echo Done. Run start_sandbox.bat to recreate.

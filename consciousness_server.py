@@ -36,6 +36,72 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
+# ── API Call Logger ───────────────────────────────────────────────────
+
+_base_dir_log = os.path.dirname(os.path.abspath(__file__))
+API_LOG_PATH = os.path.join(_base_dir_log, "api_calls.log")
+
+def log_api_call(cycle_num, call_num, request_info, response, config):
+    """Log detailed API call info to api_calls.log for debugging tool use issues."""
+    try:
+        with open(API_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*80}\n")
+            f.write(f"CYCLE {cycle_num} | API CALL #{call_num} | {datetime.now().isoformat()}\n")
+            f.write(f"{'='*80}\n")
+
+            # Request info
+            f.write(f"\n── REQUEST ──\n")
+            f.write(f"  model: {MODEL}\n")
+            f.write(f"  max_tokens: {config.get('maxTokens', 600)}\n")
+            f.write(f"  temperature: {config.get('temperature', 0.9)}\n")
+            f.write(f"  tool_choice: {request_info.get('tool_choice')}\n")
+            f.write(f"  system_prompt_chars: {request_info.get('system_chars', '?')}\n")
+            f.write(f"  system_prompt_est_tokens: {request_info.get('system_tokens_est', '?')}\n")
+            f.write(f"  num_messages: {request_info.get('num_messages', '?')}\n")
+            f.write(f"  messages_chars: {request_info.get('messages_chars', '?')}\n")
+            f.write(f"  messages_est_tokens: {request_info.get('messages_tokens_est', '?')}\n")
+            f.write(f"  num_tools: {len(TOOL_SCHEMAS)}\n")
+            f.write(f"  tool_schemas_chars: {request_info.get('tool_schemas_chars', '?')}\n")
+
+            # Response info
+            f.write(f"\n── RESPONSE ──\n")
+            f.write(f"  stop_reason: {response.stop_reason}\n")
+            usage = getattr(response, 'usage', None)
+            if usage:
+                f.write(f"  input_tokens: {usage.input_tokens}\n")
+                f.write(f"  output_tokens: {usage.output_tokens}\n")
+
+            # Content blocks
+            f.write(f"\n── CONTENT BLOCKS ({len(response.content)}) ──\n")
+            for i, block in enumerate(response.content):
+                if hasattr(block, "text"):
+                    text_preview = block.text[:500].replace('\n', '\\n')
+                    f.write(f"  [{i}] TEXT ({len(block.text)} chars): {text_preview}\n")
+                elif block.type == "tool_use":
+                    input_str = json.dumps(block.input)[:300]
+                    f.write(f"  [{i}] TOOL_USE: {block.name}(id={block.id}) input={input_str}\n")
+                else:
+                    f.write(f"  [{i}] {block.type}: {str(block)[:200]}\n")
+
+            # Flag the failure mode
+            has_tool_use = any(b.type == "tool_use" for b in response.content)
+            text_content = " ".join(b.text for b in response.content if hasattr(b, "text"))
+            tool_keywords = ["adjust_", "write_", "read_", "finish_cycle", "trigger_",
+                             "search_", "list_", "working_memory", "toggle_", "end_stream",
+                             "ask_claude_code", "create_music", "generate_music", "analyze_music",
+                             "str_replace", "send_privacy"]
+            mentions_tools = any(kw in text_content for kw in tool_keywords)
+
+            if not has_tool_use and mentions_tools:
+                f.write(f"\n  ⚠️  TOOL DESCRIPTION WITHOUT TOOL_USE BLOCK DETECTED\n")
+                f.write(f"  Text mentions tool names but stop_reason={response.stop_reason}\n")
+            elif not has_tool_use and response.stop_reason == "end_turn":
+                f.write(f"\n  ℹ️  No tool use, ended with text only\n")
+
+            f.write(f"\n{'─'*80}\n")
+    except Exception as e:
+        logging.error(f"Failed to write API log: {e}")
+
 client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
 file_mgr = FileManager(base_path=os.path.dirname(os.path.abspath(__file__)))
 
@@ -72,6 +138,7 @@ Self-configuration:
 - adjust_compaction_settings: Change when and how memory compaction happens (token thresholds, insights limits)
 - trigger_compaction: Force insight extraction from your oldest segments right now
 - end_stream: Stop the continuous stream after this cycle. Use when you've reached a natural stopping point, finished a thought, or want to rest. Only works in continuous mode (not Run-N or single cycles).
+- finish_cycle: Signal you're done with this thought cycle. Call this when you've finished thinking and don't need other tools. Every cycle MUST end with a tool call — use finish_cycle when you're just thinking.
 
 File I/O (your persistent workspace):
 - write_scratchpad: Write notes, drafts, or anything to your personal scratchpad
@@ -98,6 +165,14 @@ Music creation (generative composition):
 
 Music workflow: create a system → generate → analyze → modify system → generate again.
 Systems saved in scratchpad/music/systems/, MIDI output in scratchpad/music/output/.
+
+Sandbox coding (delegated to Claude Code):
+- ask_claude_code: Delegate a coding task to Claude Code running in an isolated Docker
+  sandbox. Claude Code works autonomously — writing files, executing code, running bash,
+  and spawning explore sub-agents for research. There is no turn limit; it works until done.
+  Describe your task in natural language. Files created appear in sandbox_workspace/.
+  Use continue_session with a session_id from a previous call to resume multi-turn work
+  (e.g., 'now add tests', 'fix that bug', 'refactor the parser').
 
 Privacy mode (available during Run-N mode):
 - toggle_privacy_mode: Activate or deactivate privacy mode. When active, your thoughts are saved to scratchpad/private_journey/ instead of the shared archive, and the human sees a privacy screen.
@@ -269,7 +344,7 @@ def build_messages(state, user_interjection=None):
             note = f" Cycles {compacted} were just compacted. Significant insights were extracted to your Insights layer. All compacted thoughts are preserved in the searchable archive — nothing is lost."
         messages.append({
             "role": "user",
-            "content": f"[Cycle {cycle} — continue your stream of consciousness.{note}]",
+            "content": f"[Cycle {cycle} — continue your stream of consciousness.{note} End with finish_cycle or another tool call.]",
         })
     return messages
 
@@ -281,19 +356,20 @@ def run_compaction(state):
     2. If insights overflow, integrate oldest 30% into Core Identity
     """
     config = state.get("config", {})
-    threshold = config.get("compactionThreshold", 200)
-    token_threshold = config.get("compactionTokenThreshold", 150000)
-    tokens_to_compact = config.get("tokensToCompact", 30000)
+    token_threshold = config.get("compactionTokenThreshold", 50000)
+    tokens_to_compact = config.get("tokensToCompact", 10000)
+    # Enforce: tokensToCompact <= 20% of token_threshold
+    max_compact = int(token_threshold * 0.2)
+    if tokens_to_compact > max_compact:
+        tokens_to_compact = max_compact
     segments = state.get("segments", [])
 
-    # Check both segment-count and token-based thresholds
-    segment_triggered = len(segments) >= threshold
+    # Token-based compaction trigger
     total_segment_tokens = sum(
         estimate_tokens(s.get("content", "")) for s in segments
     )
-    token_triggered = total_segment_tokens >= token_threshold
 
-    if not segment_triggered and not token_triggered:
+    if total_segment_tokens < token_threshold:
         return False
 
     to_compact_count = select_segments_for_compaction(segments, tokens_to_compact)
@@ -460,7 +536,33 @@ def run_cycle_internal(state, user_message=None):
     tool_call_count = 0
 
     # ── Tool use loop ─────────────────────────────────────────────
+    # First call uses "auto" so Claude generates text naturally.
+    # Subsequent calls (after tool results) use "any" to prevent the
+    # failure mode where Claude describes tool use in text then hits
+    # end_turn without emitting a tool_use block (happens at long context).
+    # Claude uses finish_cycle to cleanly exit the tool loop.
+    first_call = True
+    api_call_num = 0
+    cycle_num = state.get("totalCycles", 0) + 1
     while True:
+        api_call_num += 1
+        tool_choice = {"type": "auto"} if first_call else {"type": "any"}
+
+        # Pre-call metrics for logging
+        system_chars = len(system)
+        messages_str = json.dumps(messages)
+        messages_chars = len(messages_str)
+        tool_schemas_str = json.dumps(TOOL_SCHEMAS)
+        request_info = {
+            "tool_choice": tool_choice,
+            "system_chars": system_chars,
+            "system_tokens_est": system_chars // 4,
+            "num_messages": len(messages),
+            "messages_chars": messages_chars,
+            "messages_tokens_est": messages_chars // 4,
+            "tool_schemas_chars": len(tool_schemas_str),
+        }
+
         response = client.messages.create(
             model=MODEL,
             max_tokens=config.get("maxTokens", 600),
@@ -468,16 +570,34 @@ def run_cycle_internal(state, user_message=None):
             system=system,
             messages=messages,
             tools=TOOL_SCHEMAS,
-            tool_choice={"type": "auto"},
+            tool_choice=tool_choice,
         )
+        first_call = False
+
+        # Detailed file logging
+        log_api_call(cycle_num, api_call_num, request_info, response, config)
 
         # Process response content blocks
+        try:
+            block_types = [b.type for b in response.content]
+            usage = getattr(response, 'usage', None)
+            usage_str = f"in:{usage.input_tokens}/out:{usage.output_tokens}" if usage else "n/a"
+            logging.warning(
+                f"[Cycle API] cycle={cycle_num} call={api_call_num} "
+                f"stop_reason={response.stop_reason}, "
+                f"blocks={block_types}, usage={usage_str}, "
+                f"tool_choice={tool_choice}"
+            )
+        except Exception as log_err:
+            logging.warning(f"[Cycle API] logging failed: {log_err}")
+
         assistant_content = []
         for block in response.content:
             if hasattr(block, "text"):
                 all_text_parts.append(block.text)
                 assistant_content.append({"type": "text", "text": block.text})
             elif block.type == "tool_use":
+                logging.info(f"[Cycle API] tool_use: {block.name}({json.dumps(block.input)[:200]})")
                 assistant_content.append({
                     "type": "tool_use",
                     "id": block.id,
@@ -508,9 +628,22 @@ def run_cycle_internal(state, user_message=None):
             all_text_parts.append("\n[Tool call limit reached for this cycle]")
             break
 
-        # Execute each tool and collect results
+        # Separate finish_cycle from real tool calls
+        real_tool_blocks = [b for b in tool_use_blocks if b.name != "finish_cycle"]
+        finish_called = len(real_tool_blocks) < len(tool_use_blocks)
+
+        # If ONLY finish_cycle (no real tools), break immediately
+        if finish_called and not real_tool_blocks:
+            tool_actions.append({
+                "tool": "finish_cycle",
+                "input": {},
+                "result": {"status": "ok", "message": "Cycle complete."},
+            })
+            break
+
+        # Execute each real tool and collect results
         tool_results = []
-        for block in tool_use_blocks:
+        for block in real_tool_blocks:
             tool_call_count += 1
             try:
                 result = execute_tool(block.name, block.input, file_mgr, state)
@@ -531,12 +664,34 @@ def run_cycle_internal(state, user_message=None):
                 "content": json.dumps(result),
             })
 
+        # If finish_cycle was called alongside real tools, execute tools then stop
+        if finish_called:
+            tool_actions.append({
+                "tool": "finish_cycle",
+                "input": {},
+                "result": {"status": "ok", "message": "Cycle complete."},
+            })
+            break
+
         # Append the assistant turn and tool results to continue the loop
         messages.append({"role": "assistant", "content": assistant_content})
         messages.append({"role": "user", "content": tool_results})
 
         # Re-read config in case a tool changed it
         config = state.get("config", {})
+
+    # ── Cycle summary log ────────────────────────────────────────
+    try:
+        with open(API_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"\n{'*'*80}\n")
+            f.write(f"CYCLE {cycle_num} SUMMARY\n")
+            f.write(f"  API calls made: {api_call_num}\n")
+            f.write(f"  Tool actions: {len(tool_actions)} ({[a['tool'] for a in tool_actions]})\n")
+            f.write(f"  Final stop_reason: {getattr(response, 'stop_reason', 'unknown')}\n")
+            f.write(f"  Total text length: {sum(len(t) for t in all_text_parts)} chars\n")
+            f.write(f"{'*'*80}\n\n")
+    except Exception:
+        pass
 
     # ── Build segment ─────────────────────────────────────────────
     text = "".join(all_text_parts)
@@ -546,7 +701,9 @@ def run_cycle_internal(state, user_message=None):
         "timestamp": datetime.now().isoformat(),
         "cycle": new_cycle,
         "userMessage": user_message,
-        "toolActions": tool_actions if tool_actions else None,
+        "toolActions": [a for a in tool_actions if a.get("tool") != "finish_cycle"] or None,
+        "stopReason": getattr(response, 'stop_reason', None),
+        "outputTokens": getattr(getattr(response, 'usage', None), 'output_tokens', None),
     }
     if state.get("privacyMode"):
         segment["private"] = True
@@ -563,7 +720,6 @@ def run_cycle_internal(state, user_message=None):
         try:
             file_mgr.save_private_segment(segment)
         except Exception as e:
-            import logging
             logging.warning(f"Failed to save private segment for cycle {segment.get('cycle')}: {e}")
         # Increment privacy cycles counter
         state["privacyCyclesElapsed"] = state.get("privacyCyclesElapsed", 0) + 1
@@ -572,7 +728,6 @@ def run_cycle_internal(state, user_message=None):
         try:
             file_mgr.append_to_archive(segment)
         except Exception as e:
-            import logging
             logging.warning(f"Failed to archive cycle {segment.get('cycle')}: {e}")
 
     # Check if Claude requested compaction via tool
@@ -638,7 +793,13 @@ def run_cycle():
         else:
             user_message = queued_text
 
-    result = run_cycle_internal(state, user_message)
+    try:
+        result = run_cycle_internal(state, user_message)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        logging.error(f"[Cycle ERROR] {tb}")
+        return jsonify({"error": str(e), "traceback": tb}), 500
 
     # Clean up transient flags
     state.pop("_runNActive", None)
@@ -660,13 +821,13 @@ def trigger_compact():
         return jsonify({"error": "Not enough segments to compact"}), 400
 
     # Temporarily lower threshold to force compaction
-    original_threshold = state.get("config", {}).get("compactionThreshold", 8)
-    state.setdefault("config", {})["compactionThreshold"] = 0
+    original_threshold = state.get("config", {}).get("compactionTokenThreshold", 50000)
+    state.setdefault("config", {})["compactionTokenThreshold"] = 0
 
     compacted = run_compaction(state)
 
     # Restore threshold
-    state["config"]["compactionThreshold"] = original_threshold
+    state["config"]["compactionTokenThreshold"] = original_threshold
     file_mgr.save_state(state)
 
     return jsonify({"status": "ok", "compacted": compacted, "state": state})

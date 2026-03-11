@@ -1,11 +1,11 @@
 {
   "maxTokens": 2000,
   "pauseBetweenCycles": 10500,
-  "compactionThreshold": 200,
-  "temperature": 0.9,
-  "tokensToCompact": 30000,
-  "insightsMaxChars": 40000,
+  "compactionThreshold": 70,
+  "temperature": 0.8,
+  "tokensToCompact": 4000,
+  "insightsMaxChars": 14000,
   "insightsOverflowPercent": 0.3,
   "coreMaxChars": 16000,
-  "compactionTokenThreshold": 150000
+  "compactionTokenThreshold": 35000
 }

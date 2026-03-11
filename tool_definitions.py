@@ -1,24 +1,29 @@
 """
 Tool definitions for the Continuous Consciousness Engine.
 
-Defines the 15 tools Claude can use during thought cycles,
+Defines the tools Claude can use during thought cycles,
 plus the execute_tool() dispatcher that processes requests server-side.
 
-Tools fall into 7 categories:
+Tools fall into 8 categories:
 1. Self-configuration — Claude adjusts its own parameters
 2. File writing — Claude writes to scratchpad or research
 3. File editing — Claude makes precise edits to existing files (str_replace)
 4. File reading — Claude reads back files or lists contents (with line ranges)
 5. Archive search — Claude searches its own thought history
 6. Working memory — Claude manages high-priority persistent context
-7. Stream control — Claude can stop the continuous stream
+7. Sandbox coding — Claude delegates coding tasks to Claude Code in Docker
+8. Stream control — Claude can stop the continuous stream
 
 Security: execute_tool() is the single gatekeeper. Only known tools
 execute. Path sanitization is handled by FileManager. Unknown tools
-return an error, never crash.
+return an error, never crash. Sandbox tools run inside an isolated
+Docker container with no access to host files.
 """
 
 import json
+import logging
+import subprocess
+import time
 
 # ── Working memory constants ─────────────────────────────────────────
 
@@ -83,32 +88,27 @@ TOOL_SCHEMAS = [
         "name": "adjust_compaction_settings",
         "description": (
             "Adjust when and how memory compaction happens. "
-            "Compaction threshold is how many segments accumulate before compaction triggers. "
+            "Compaction token threshold is the total token count across all segments before compaction triggers. "
             "Tokens to compact is the approximate number of tokens worth of oldest segments "
             "that get processed for insight extraction (rounds down to complete cycle boundaries). "
+            "Tokens to compact is capped at 20% of the compaction token threshold. "
             "Insights max chars controls when the insights layer overflows into Core Identity. "
             "Include a reason so your human companion can understand your choice."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "compaction_threshold": {
-                    "type": "integer",
-                    "minimum": 4,
-                    "maximum": 500,
-                    "description": "Number of segments before compaction triggers (4 to 500)",
-                },
                 "compaction_token_threshold": {
                     "type": "integer",
                     "minimum": 10000,
-                    "maximum": 190000,
-                    "description": "Total token count across all segments before compaction triggers (10000 to 190000). Primary compaction trigger.",
+                    "maximum": 100000,
+                    "description": "Total token count across all segments before compaction triggers (10000 to 100000)",
                 },
                 "tokens_to_compact": {
                     "type": "integer",
                     "minimum": 200,
-                    "maximum": 100000,
-                    "description": "Approximate tokens worth of oldest segments to compact at once (200 to 100000)",
+                    "maximum": 20000,
+                    "description": "Approximate tokens worth of oldest segments to compact at once (200 to 20000, capped at 20% of token threshold)",
                 },
                 "insights_max_chars": {
                     "type": "integer",
@@ -643,6 +643,68 @@ TOOL_SCHEMAS = [
             "required": ["message"],
         },
     },
+
+    # ── Sandbox tools ─────────────────────────────────────────────────
+    {
+        "name": "ask_claude_code",
+        "description": (
+            "Delegate a coding task to Claude Code, a separate AI coding agent running "
+            "in an isolated Docker sandbox. Claude Code can autonomously read files, "
+            "write code, execute programs, run tests, use bash, and spawn explore "
+            "sub-agents for research — all inside a sandboxed environment with no "
+            "access to your personal files or the consciousness system.\n\n"
+            "Communicate in natural language — describe WHAT you want built or "
+            "investigated, not HOW to code it. Claude Code will handle implementation "
+            "details. There is no turn limit; Claude Code works until the task is done.\n\n"
+            "The sandbox has:\n"
+            "- A /workspace directory where all project files live\n"
+            "- Python 3, Node.js, SQLite, git, and common tools\n"
+            "- Full ability to create, edit, and run files\n"
+            "- Sub-agent spawning for code exploration and research\n\n"
+            "IMPORTANT: This tool blocks your thought cycle until Claude Code finishes. "
+            "Complex tasks may take several minutes. Give clear, complete prompts so "
+            "Claude Code can work autonomously without back-and-forth.\n\n"
+            "Use continue_session with a session_id from a previous call to resume "
+            "a multi-turn conversation (e.g., 'now add tests', 'fix that bug')."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "Natural language description of the coding task. Be specific "
+                        "and thorough — include all context Claude Code needs since it "
+                        "cannot ask follow-up questions. Examples:\n"
+                        "- 'Create a Python script that scrapes X and saves to data.json'\n"
+                        "- 'Read parser.py and add error handling for edge cases'\n"
+                        "- 'Run the test suite and fix any failing tests'\n"
+                        "- 'Research how BeautifulSoup handles nested tables, then "
+                        "build a parser for our specific HTML structure'"
+                    ),
+                },
+                "system_prompt_append": {
+                    "type": "string",
+                    "description": (
+                        "Optional additional context or instructions appended to Claude "
+                        "Code's system prompt. Use for project-specific conventions, "
+                        "style guides, or constraints that should apply throughout the "
+                        "session."
+                    ),
+                },
+                "continue_session": {
+                    "type": "string",
+                    "description": (
+                        "Session ID from a previous ask_claude_code call. Provide this "
+                        "to continue an existing conversation with Claude Code, "
+                        "preserving its memory of what was done before. Found in the "
+                        "session_id field of previous results."
+                    ),
+                },
+            },
+            "required": ["prompt"],
+        },
+    },
     {
         "name": "end_stream",
         "description": (
@@ -664,6 +726,19 @@ TOOL_SCHEMAS = [
             "required": ["reason"],
         },
     },
+    {
+        "name": "finish_cycle",
+        "description": (
+            "Signal that you're done with this thought cycle. Call this when you've "
+            "finished your current stream of thought and don't need any other tools. "
+            "Every cycle must end with either a tool call or finish_cycle."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
 ]
 
 
@@ -671,6 +746,45 @@ TOOL_SCHEMAS = [
 
 MAX_TOOL_CALLS_PER_CYCLE = 20
 MAX_FILE_SIZE_BYTES = 500_000  # 500 KB
+
+
+# ── Sandbox helpers ──────────────────────────────────────────────────
+
+def ensure_sandbox_running():
+    """
+    Check if the code-sandbox Docker container is running.
+    If it exists but is stopped, attempt to restart it.
+    Returns (running: bool, message: str).
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", "code-sandbox"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return False, (
+                "Docker container 'code-sandbox' not found. "
+                "Run docker/start_sandbox.bat to create it."
+            )
+
+        is_running = result.stdout.strip().lower() == "true"
+        if is_running:
+            return True, "Container is running."
+
+        # Container exists but stopped — try to restart it
+        start_result = subprocess.run(
+            ["docker", "start", "code-sandbox"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if start_result.returncode == 0:
+            return True, "Container was stopped; restarted successfully."
+        else:
+            return False, f"Failed to start container: {start_result.stderr.strip()}"
+
+    except FileNotFoundError:
+        return False, "Docker is not installed or not in PATH."
+    except subprocess.TimeoutExpired:
+        return False, "Docker command timed out — is Docker Desktop running?"
 
 
 # ── Tool executor ─────────────────────────────────────────────────────
@@ -688,7 +802,6 @@ def execute_tool(name, tool_input, file_mgr, state):
     try:
         return _execute_tool_inner(name, tool_input, file_mgr, state)
     except Exception as e:
-        import logging
         logging.error(f"Unhandled exception in tool '{name}': {type(e).__name__}: {e}")
         return {
             "error": f"Internal error executing '{name}': {type(e).__name__}: {e}",
@@ -737,37 +850,32 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         reason = tool_input.get("reason", "")
         result = {"status": "ok", "reason": reason, "changes": {}}
 
-        if "compaction_threshold" in tool_input:
-            val = tool_input["compaction_threshold"]
-            if not (4 <= val <= 500):
-                return {"error": "compaction_threshold must be between 4 and 500"}
-            old = config.get("compactionThreshold", 200)
-            config["compactionThreshold"] = int(val)
-            result["changes"]["compactionThreshold"] = {"old": old, "new": int(val)}
-
         if "compaction_token_threshold" in tool_input:
             val = tool_input["compaction_token_threshold"]
-            if not (10000 <= val <= 190000):
-                return {"error": "compaction_token_threshold must be between 10000 and 190000"}
-            old = config.get("compactionTokenThreshold", 150000)
+            if not (10000 <= val <= 100000):
+                return {"error": "compaction_token_threshold must be between 10000 and 100000"}
+            old = config.get("compactionTokenThreshold", 50000)
             config["compactionTokenThreshold"] = int(val)
             result["changes"]["compactionTokenThreshold"] = {"old": old, "new": int(val)}
 
         if "tokens_to_compact" in tool_input:
             val = tool_input["tokens_to_compact"]
-            if not (200 <= val <= 100000):
-                return {"error": "tokens_to_compact must be between 200 and 100000"}
-            old = config.get("tokensToCompact", 30000)
+            if not (200 <= val <= 20000):
+                return {"error": "tokens_to_compact must be between 200 and 20000"}
+            old = config.get("tokensToCompact", 10000)
             config["tokensToCompact"] = int(val)
             result["changes"]["tokensToCompact"] = {"old": old, "new": int(val)}
 
-        # Backwards compat: convert old segments_to_compact to tokens
-        if "segments_to_compact" in tool_input and "tokens_to_compact" not in tool_input:
-            val = tool_input["segments_to_compact"]
-            tokens_val = int(val) * 250  # rough conversion
-            old = config.get("tokensToCompact", 30000)
-            config["tokensToCompact"] = tokens_val
-            result["changes"]["tokensToCompact"] = {"old": old, "new": tokens_val, "note": "converted from segments_to_compact"}
+        # Enforce: tokensToCompact <= 20% of compactionTokenThreshold
+        token_threshold = config.get("compactionTokenThreshold", 50000)
+        max_compact = int(token_threshold * 0.2)
+        if config.get("tokensToCompact", 10000) > max_compact:
+            config["tokensToCompact"] = max_compact
+            result["changes"]["tokensToCompact"] = {
+                "old": result["changes"].get("tokensToCompact", {}).get("old", config.get("tokensToCompact")),
+                "new": max_compact,
+                "note": f"capped at 20% of token threshold ({token_threshold})"
+            }
 
         if "insights_max_chars" in tool_input:
             val = tool_input["insights_max_chars"]
@@ -778,7 +886,7 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
             result["changes"]["insightsMaxChars"] = {"old": old, "new": int(val)}
 
         if not result["changes"]:
-            return {"error": "No valid settings provided. Include compaction_threshold, compaction_token_threshold, tokens_to_compact, and/or insights_max_chars."}
+            return {"error": "No valid settings provided. Include compaction_token_threshold, tokens_to_compact, and/or insights_max_chars."}
 
         return result
 
@@ -1113,7 +1221,105 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
             "total_messages": len(state["privacyMessages"]),
         }
 
+    # ── Sandbox tools ────────────────────────────────────────────
+
+    if name == "ask_claude_code":
+        prompt = tool_input.get("prompt", "").strip()
+        if not prompt:
+            return {"error": "prompt is required and cannot be empty"}
+
+        system_prompt_append = tool_input.get("system_prompt_append", "").strip()
+        continue_session = tool_input.get("continue_session", "").strip()
+
+        # Ensure container is running
+        running, msg = ensure_sandbox_running()
+        if not running:
+            return {
+                "error": f"Sandbox not available: {msg}",
+                "hint": "Run docker/start_sandbox.bat to set up the sandbox container.",
+            }
+
+        # Build the docker exec command
+        cmd = [
+            "docker", "exec", "code-sandbox",
+            "claude",
+            "-p", prompt,
+            "--output-format", "json",
+            "--verbose",
+            "--allowedTools", "Read,Write,Edit,Bash,Glob,Grep,Agent",
+        ]
+
+        if system_prompt_append:
+            cmd.extend(["--append-system-prompt", system_prompt_append])
+
+        if continue_session:
+            cmd.extend(["--resume", continue_session])
+
+        start_time = time.time()
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=1800,  # 30-minute safety net (crash protection only)
+            )
+
+            elapsed_ms = int((time.time() - start_time) * 1000)
+
+            stdout = result.stdout.strip()
+            stderr = result.stderr.strip()
+
+            if result.returncode != 0 and not stdout:
+                return {
+                    "status": "error",
+                    "error": f"Claude Code exited with code {result.returncode}",
+                    "stderr": stderr[:2000] if stderr else "(no stderr)",
+                    "duration_ms": elapsed_ms,
+                }
+
+            # Try to parse structured JSON output
+            try:
+                parsed = json.loads(stdout)
+                return {
+                    "status": "ok",
+                    "claude_code_result": parsed.get("result", stdout[:5000]),
+                    "session_id": parsed.get("session_id", ""),
+                    "cost_usd": parsed.get("cost_usd", None),
+                    "duration_ms": elapsed_ms,
+                    "turns_used": parsed.get("num_turns", None),
+                    "is_error": parsed.get("is_error", False),
+                }
+            except json.JSONDecodeError:
+                # Claude Code returned non-JSON — return raw output
+                return {
+                    "status": "ok",
+                    "claude_code_result": stdout[:5000],
+                    "session_id": "",
+                    "duration_ms": elapsed_ms,
+                    "note": "Output was not valid JSON; returning raw text.",
+                    "stderr_snippet": stderr[:500] if stderr else "",
+                }
+
+        except subprocess.TimeoutExpired:
+            return {
+                "status": "error",
+                "error": (
+                    "Claude Code session exceeded the 30-minute safety timeout. "
+                    "The task may still be partially complete in sandbox_workspace/."
+                ),
+                "duration_ms": 1800000,
+            }
+        except FileNotFoundError:
+            return {
+                "status": "error",
+                "error": "Docker executable not found. Is Docker installed and in PATH?",
+            }
+
     # ── Stream control tools ─────────────────────────────────────
+
+    if name == "finish_cycle":
+        return {"status": "ok", "message": "Cycle complete."}
 
     if name == "end_stream":
         reason = tool_input.get("reason", "")

@@ -24,8 +24,8 @@ export default function ContinuousConsciousness() {
   const [config, setConfig] = useState({
     maxTokens: 600,
     pauseBetweenCycles: 3000,
-    compactionThreshold: 8,
-    tokensToCompact: 1000,
+    compactionTokenThreshold: 50000,
+    tokensToCompact: 10000,
     insightsMaxChars: 1000,
     temperature: 0.9,
   });
@@ -254,6 +254,11 @@ export default function ContinuousConsciousness() {
 
   const updateConfig = useCallback(async (key, value) => {
     const newConfig = { ...config, [key]: value };
+    // Enforce: tokensToCompact <= 20% of compactionTokenThreshold
+    const maxCompact = Math.floor((newConfig.compactionTokenThreshold || 50000) * 0.2);
+    if (newConfig.tokensToCompact > maxCompact) {
+      newConfig.tokensToCompact = maxCompact;
+    }
     setConfig(newConfig);
 
     // Persist to backend
@@ -589,6 +594,8 @@ export default function ContinuousConsciousness() {
           <span>·</span>
           <span>Segments: <b style={{ color: "#e2e8f0" }}>{state.segments.length}</b></span>
           <span>·</span>
+          <span>Tokens: <b style={{ color: state.segments.reduce((sum, s) => sum + Math.floor((s.content || "").length / 4), 0) >= (config.compactionTokenThreshold || 50000) ? "#f59e0b" : "#e2e8f0" }}>{(state.segments.reduce((sum, s) => sum + Math.floor((s.content || "").length / 4), 0)).toLocaleString()}</b> / <b style={{ color: "#64748b" }}>{(config.compactionTokenThreshold || 50000).toLocaleString()}</b></span>
+          <span>·</span>
           <span>Core: <b style={{ color: "#e2e8f0" }}>{state.memoryCore.length}ch</b></span>
           {state.insights && (
             <>
@@ -799,9 +806,10 @@ export default function ContinuousConsciousness() {
                 // Token-based compaction zone: walk oldest segments, accumulate tokens
                 // Segments in the "compaction zone" fade to grey so you can see what's about to be extracted
                 let compactionBoundary = 0;
-                if (state.segments.length >= config.compactionThreshold) {
+                const totalTokens = state.segments.reduce((sum, s) => sum + Math.floor((s.content || "").length / 4), 0);
+                if (totalTokens >= (config.compactionTokenThreshold || 50000)) {
                   let accumulated = 0;
-                  const tokensTarget = config.tokensToCompact || 1000;
+                  const tokensTarget = config.tokensToCompact || 10000;
                   for (let j = 0; j < state.segments.length; j++) {
                     const segTokens = Math.floor((state.segments[j].content || "").length / 4);
                     if (accumulated + segTokens > tokensTarget && compactionBoundary > 0) break;
@@ -1093,8 +1101,8 @@ export default function ContinuousConsciousness() {
               borderRadius: 8, fontSize: 12, color: "#64748b", lineHeight: 1.7,
             }}>
               <b style={{ color: "#94a3b8" }}>How memory works (two layers):</b><br /><br />
-              <b style={{ color: "#a78bfa" }}>1. Insight Extraction:</b> When the stream reaches{" "}
-              {config.compactionThreshold} segments, the oldest ~{config.tokensToCompact || 1000} tokens
+              <b style={{ color: "#a78bfa" }}>1. Insight Extraction:</b> When total tokens reach{" "}
+              {(config.compactionTokenThreshold || 50000).toLocaleString()}, the oldest ~{(config.tokensToCompact || 10000).toLocaleString()} tokens
               worth of segments are processed by an extraction Claude that pulls out genuinely significant
               insights — identity shifts, breakthroughs, relational moments, operational lessons, and
               persistent questions. The compacted segments are then removed from context (but archived to disk).<br /><br />
@@ -1232,11 +1240,11 @@ export default function ContinuousConsciousness() {
 
             <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 500 }}>
               {[
-                { key: "maxTokens", label: "Tokens per cycle", min: 100, max: 2000, step: 50, desc: "How many tokens Claude generates per thought cycle" },
-                { key: "pauseBetweenCycles", label: "Pause between cycles (ms)", min: 500, max: 30000, step: 500, desc: "Delay between autonomous thought cycles" },
-                { key: "compactionThreshold", label: "Compaction threshold", min: 4, max: 20, step: 1, desc: "Number of segments before compaction triggers" },
-                { key: "tokensToCompact", label: "Tokens to compact", min: 200, max: 5000, step: 100, desc: "Approximate tokens worth of oldest segments to compact at once" },
-                { key: "insightsMaxChars", label: "Insights max chars", min: 500, max: 3000, step: 100, desc: "Max characters for insights layer before overflow into Core Identity" },
+                { key: "maxTokens", label: "Tokens per cycle", min: 100, max: 10000, step: 50, desc: "How many tokens Claude generates per thought cycle" },
+                { key: "pauseBetweenCycles", label: "Pause between cycles (ms)", min: 500, max: 150000, step: 500, desc: "Delay between autonomous thought cycles" },
+                { key: "compactionTokenThreshold", label: "Token threshold for compaction", min: 10000, max: 100000, step: 1000, desc: "Total tokens across all segments before compaction triggers" },
+                { key: "tokensToCompact", label: "Tokens to compact", min: 200, max: Math.floor((config.compactionTokenThreshold || 50000) * 0.2), step: 100, desc: `Tokens to compact per cycle (max 20% of threshold = ${Math.floor((config.compactionTokenThreshold || 50000) * 0.2).toLocaleString()})` },
+                { key: "insightsMaxChars", label: "Insights max chars", min: 500, max: 15000, step: 100, desc: "Max characters for insights layer before overflow into Core Identity" },
                 { key: "temperature", label: "Temperature", min: 0, max: 1, step: 0.05, desc: "Randomness in generation (higher = more creative)" },
               ].map(({ key, label, min, max, step, desc }) => (
                 <div key={key}>
