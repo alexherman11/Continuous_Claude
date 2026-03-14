@@ -27,6 +27,9 @@ import os
 import subprocess
 import time
 
+from dynamic_tools import load_dynamic_tools, get_dynamic_schemas, execute_dynamic_tool, list_dynamic_tools, disable_tool as disable_dynamic_tool
+from change_manager import propose_change, list_changes, rollback_change, apply_approved_changes
+
 # ── Working memory constants ─────────────────────────────────────────
 
 from file_manager import WORKING_MEMORY_LIMIT
@@ -855,6 +858,94 @@ TOOL_SCHEMAS = [
             "required": ["file", "old_str"],
         },
     },
+
+    # ── Self-modification tools (change proposal system) ──────────
+
+    {
+        "name": "propose_code_change",
+        "description": (
+            "Propose a change to your own codebase. Develop the code in the Docker sandbox "
+            "first (via ask_claude_code), then call this to submit it for validation and deployment. "
+            "Tier 1 changes (new dynamic tools) auto-deploy after validation. "
+            "Tier 2/3 changes (modifying existing tools or engine code) require Alex's approval. "
+            "The source file should be in sandbox_workspace/."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_file": {
+                    "type": "string",
+                    "description": (
+                        "Path to the source file in sandbox_workspace/ "
+                        "(e.g., 'my_tool.py'). This file will be read and validated."
+                    ),
+                },
+                "target_file": {
+                    "type": "string",
+                    "description": (
+                        "Where to deploy the file, relative to the project root. "
+                        "For new tools: 'dynamic_tools/enabled/my_tool.py'. "
+                        "For engine changes: 'tool_definitions.py', 'consciousness_server.py', etc."
+                    ),
+                },
+                "description": {
+                    "type": "string",
+                    "description": "What this change does and why it's needed.",
+                },
+                "change_type": {
+                    "type": "string",
+                    "enum": ["new_tool", "modify_tool", "modify_engine", "new_file"],
+                    "description": "The type of change being proposed.",
+                },
+            },
+            "required": ["source_file", "target_file", "description", "change_type"],
+        },
+    },
+    {
+        "name": "list_proposed_changes",
+        "description": (
+            "List all proposed code changes and their status. "
+            "Filter by status: 'pending', 'approved', 'applied', 'rejected', or omit for all."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "approved", "applied", "rejected"],
+                    "description": "Filter by status (optional — omit to see all).",
+                },
+            },
+        },
+    },
+    {
+        "name": "rollback_change",
+        "description": (
+            "Rollback a previously applied code change. For dynamic tools, moves the file "
+            "to disabled/. For core files, restores from the git snapshot taken before the change."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "change_id": {
+                    "type": "string",
+                    "description": "The ID of the change to rollback (e.g., 'change_0001').",
+                },
+            },
+            "required": ["change_id"],
+        },
+    },
+    {
+        "name": "list_dynamic_tools",
+        "description": (
+            "List all currently loaded dynamic tools with their descriptions and source files. "
+            "Dynamic tools are hot-loaded from dynamic_tools/enabled/ each cycle."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 
@@ -869,6 +960,8 @@ def build_tools_with_search():
     Always-loaded tools are sent in full. All others get defer_loading=True
     and are discovered via the Tool Search tool at runtime.
     Saves ~4.5K tokens per API call.
+
+    Also includes dynamically loaded tools from dynamic_tools/enabled/.
     """
     tools = []
     for schema in TOOL_SCHEMAS:
@@ -876,6 +969,13 @@ def build_tools_with_search():
         if tool["name"] not in ALWAYS_LOADED_TOOLS:
             tool["defer_loading"] = True
         tools.append(tool)
+
+    # Merge dynamic tool schemas (all deferred)
+    for schema in get_dynamic_schemas():
+        tool = dict(schema)
+        tool["defer_loading"] = True
+        tools.append(tool)
+
     # Add the tool search tool itself
     tools.append(TOOL_SEARCH_SCHEMA)
     return tools
@@ -1479,13 +1579,29 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         target_file = tool_input.get("file", "")
         allowed_files = {
             "consciousness_server.py",
+            "continuous_consciousness.py",
             "tool_definitions.py",
             "file_manager.py",
+            "change_manager.py",
         }
-        if target_file not in allowed_files:
-            return {"error": f"Invalid file: {target_file}. Allowed: {', '.join(sorted(allowed_files))}"}
-
         engine_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Also allow dynamic tool files and the dynamic tools loader
+        is_dynamic = (
+            target_file.startswith("dynamic_tools/")
+            and target_file.endswith(".py")
+        )
+
+        if target_file not in allowed_files and not is_dynamic:
+            # Build list of available dynamic tool files for the error message
+            dyn_dir = os.path.join(engine_dir, "dynamic_tools", "enabled")
+            dyn_files = []
+            if os.path.isdir(dyn_dir):
+                dyn_files = [f"dynamic_tools/enabled/{f}" for f in os.listdir(dyn_dir) if f.endswith(".py")]
+            dyn_files.append("dynamic_tools/__init__.py")
+            all_allowed = sorted(allowed_files) + sorted(dyn_files)
+            return {"error": f"Invalid file: {target_file}. Allowed: {', '.join(all_allowed)}"}
+
         full_path = os.path.join(engine_dir, target_file)
         if not os.path.exists(full_path):
             return {"error": f"File not found: {target_file}"}
@@ -1500,11 +1616,11 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
             end = total_lines if view_range[1] == -1 else min(view_range[1], total_lines)
         else:
             start = 1
-            end = min(200, total_lines)
+            end = min(500, total_lines)
 
-        # Cap at 200 lines per read
-        if end - start + 1 > 200:
-            end = start + 199
+        # Cap at 500 lines per read
+        if end - start + 1 > 500:
+            end = start + 499
 
         selected = lines[start - 1 : end]
         numbered = "".join(f"{start + i:4d} | {line}" for i, line in enumerate(selected))
@@ -1515,7 +1631,7 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
             "total_lines": total_lines,
             "view_range": [start, end],
             "lines_shown": len(selected),
-            "note": "Read-only access. Use view_range to navigate.",
+            "note": "Read-only access. Use view_range to navigate. Now includes dynamic tools and change_manager.",
         }
 
     if name == "view_prompt_file":
@@ -1600,6 +1716,55 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
             "chars_inserted": len(new_str),
             "note": "Changes will take effect on the next cycle.",
         }
+
+    # ── Self-modification tools (change proposal system) ────────
+
+    if name == "propose_code_change":
+        source_file = tool_input.get("source_file", "").strip()
+        target_file = tool_input.get("target_file", "").strip()
+        description = tool_input.get("description", "").strip()
+        change_type = tool_input.get("change_type", "").strip()
+
+        if not all([source_file, target_file, description, change_type]):
+            return {"error": "All fields required: source_file, target_file, description, change_type"}
+
+        # Resolve source path in sandbox_workspace
+        engine_dir = os.path.dirname(os.path.abspath(__file__))
+        source_path = os.path.join(engine_dir, "sandbox_workspace", source_file)
+        if not os.path.exists(source_path):
+            return {
+                "error": f"Source file not found: sandbox_workspace/{source_file}",
+                "hint": "Use ask_claude_code to develop the file in the sandbox first.",
+            }
+
+        cycle = state.get("totalCycles", 0)
+        return propose_change(source_path, target_file, description, change_type, cycle=cycle)
+
+    if name == "list_proposed_changes":
+        status_filter = tool_input.get("status")
+        return list_changes(status_filter)
+
+    if name == "rollback_change":
+        change_id = tool_input.get("change_id", "").strip()
+        if not change_id:
+            return {"error": "change_id is required"}
+        return rollback_change(change_id)
+
+    if name == "list_dynamic_tools":
+        tools = list_dynamic_tools()
+        if not tools:
+            return {
+                "status": "ok",
+                "tools": {},
+                "message": "No dynamic tools loaded. Create one in dynamic_tools/enabled/.",
+            }
+        return {"status": "ok", "tools": tools}
+
+    # ── Dynamic tool dispatch (fallback) ─────────────────────────
+
+    dynamic_result = execute_dynamic_tool(name, tool_input, file_mgr, state)
+    if dynamic_result is not None:
+        return dynamic_result
 
     # ── Unknown tool ──────────────────────────────────────────────
 

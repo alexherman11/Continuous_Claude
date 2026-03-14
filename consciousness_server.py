@@ -29,6 +29,8 @@ from pdf_importer import (
     parse_memory_core_only,
 )
 from tool_definitions import TOOL_SCHEMAS, execute_tool, MAX_TOOL_CALLS_PER_CYCLE, build_tools_with_search
+from dynamic_tools import load_dynamic_tools
+from change_manager import apply_approved_changes
 
 # ── Setup ─────────────────────────────────────────────────────────────
 
@@ -129,7 +131,7 @@ INTEGRATION_PROMPT_BASE = ""
 CYCLE_PROMPTS = {}
 
 def reload_prompts():
-    """Re-read all prompt files from disk. Called before each cycle."""
+    """Re-read all prompt files from disk."""
     global SYSTEM_PROMPT, EXTRACTION_PROMPT_BASE, INTEGRATION_PROMPT_BASE, CYCLE_PROMPTS
 
     SYSTEM_PROMPT = _load_prompt_file(
@@ -151,8 +153,37 @@ def reload_prompts():
         logging.error(f"Failed to parse cycle_prompts.json: {e}")
         CYCLE_PROMPTS = {}
 
+
+def reload_hot_config():
+    """
+    Reload all hot-loadable configuration before each cycle:
+    1. Prompt files (so Claude's edits take effect immediately)
+    2. Dynamic tools (so new tools in dynamic_tools/enabled/ are available)
+    3. Approved changes (deploy any changes Alex has approved)
+    """
+    reload_prompts()
+
+    # Load/reload dynamic tools from dynamic_tools/enabled/
+    try:
+        registry = load_dynamic_tools()
+        if registry:
+            logging.info(f"Dynamic tools loaded: {', '.join(registry.keys())}")
+    except Exception as e:
+        logging.error(f"Failed to load dynamic tools: {e}")
+
+    # Apply any changes that Alex has moved to approved/
+    try:
+        applied = apply_approved_changes()
+        if applied:
+            logging.info(f"Applied approved changes: {', '.join(applied)}")
+            # Reload dynamic tools again in case an approved change was a new tool
+            load_dynamic_tools()
+    except Exception as e:
+        logging.error(f"Failed to apply approved changes: {e}")
+
+
 # Initial load at startup
-reload_prompts()
+reload_hot_config()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -499,8 +530,8 @@ def run_cycle_internal(state, user_message=None):
     Returns: { "segment": {...}, "compacted": bool, "state": state }
     Mutates state in place (appends segment, updates cycles, runs compaction).
     """
-    # Hot-reload prompts so Claude's edits take effect immediately
-    reload_prompts()
+    # Hot-reload all config: prompts, dynamic tools, approved changes
+    reload_hot_config()
 
     config = state.get("config", {})
     messages = build_messages(state, user_message)
@@ -813,6 +844,21 @@ def run_cycle():
         import traceback
         tb = traceback.format_exc()
         logging.error(f"[Cycle ERROR] {tb}")
+
+        # Crash recovery: if a dynamic tool or recently applied change caused the crash,
+        # attempt to identify and disable it
+        try:
+            from change_manager import list_changes
+            recent = list_changes("applied")
+            if recent.get("changes"):
+                latest = recent["changes"][-1]
+                if latest.get("target_file", "").startswith("dynamic_tools/"):
+                    from dynamic_tools import disable_tool as _disable
+                    _disable(latest["target_file"].split("/")[-1].replace(".py", ""))
+                    logging.warning(f"[Crash Recovery] Disabled recently applied dynamic tool: {latest['id']}")
+        except Exception as recovery_err:
+            logging.error(f"[Crash Recovery] Failed: {recovery_err}")
+
         return jsonify({"error": str(e), "traceback": tb}), 500
 
     # Clean up transient flags

@@ -36,6 +36,7 @@ if %ERRORLEVEL% == 0 (
         --cap-add=NET_ADMIN ^
         -e "ANTHROPIC_API_KEY=%API_KEY%" ^
         -v "%PROJECT_DIR%\sandbox_workspace:/workspace" ^
+        -v "%PROJECT_DIR%:/engine:ro" ^
         code-sandbox-img
 
     echo Configuring network firewall...
