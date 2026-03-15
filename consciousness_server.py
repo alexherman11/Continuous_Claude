@@ -12,6 +12,7 @@ Run with: /c/Python313/python.exe consciousness_server.py
 """
 
 import os
+import sys
 import json
 import logging
 import tempfile
@@ -130,6 +131,10 @@ EXTRACTION_PROMPT_BASE = ""
 INTEGRATION_PROMPT_BASE = ""
 CYCLE_PROMPTS = {}
 
+# Pluggable compaction functions — loaded from scratchpad/compaction/
+COMPACTION_PLUGINS = {}
+_compaction_dir = os.path.join(_base_dir, "scratchpad", "compaction")
+
 def reload_prompts():
     """Re-read all prompt files from disk."""
     global SYSTEM_PROMPT, EXTRACTION_PROMPT_BASE, INTEGRATION_PROMPT_BASE, CYCLE_PROMPTS
@@ -154,14 +159,76 @@ def reload_prompts():
         CYCLE_PROMPTS = {}
 
 
+def reload_compaction_plugins():
+    """
+    Hot-reload pluggable compaction functions from scratchpad/compaction/.
+
+    Each .py file must define one function matching its filename:
+      should_compact.py  -> should_compact(state, segments, config) -> (bool, str|None)
+      select_segments.py -> select_segments(segments, config) -> (to_compact, remaining)
+      format_segments.py -> format_segments(to_compact, state) -> str
+      post_process.py    -> post_process(raw_insights, compaction_num, compacted_cycles, state) -> str
+
+    If a file is missing, has syntax errors, or doesn't define the expected function,
+    the engine falls back to built-in defaults. Claude can safely experiment.
+    """
+    global COMPACTION_PLUGINS
+    plugins = {}
+
+    plugin_specs = {
+        "should_compact": "should_compact",
+        "select_segments": "select_segments",
+        "format_segments": "format_segments",
+        "post_process": "post_process",
+    }
+
+    for filename_base, func_name in plugin_specs.items():
+        filepath = os.path.join(_compaction_dir, f"{filename_base}.py")
+        if not os.path.exists(filepath):
+            continue
+
+        try:
+            import importlib.util
+            import py_compile
+            py_compile.compile(filepath, doraise=True)
+
+            module_name = f"compaction_plugin.{filename_base}"
+            spec = importlib.util.spec_from_file_location(module_name, filepath)
+            module = importlib.util.module_from_spec(spec)
+
+            # Force fresh import every time
+            if module_name in sys.modules:
+                del sys.modules[module_name]
+
+            spec.loader.exec_module(module)
+
+            func = getattr(module, func_name, None)
+            if func and callable(func):
+                plugins[func_name] = func
+                logging.debug(f"Compaction plugin loaded: {func_name} from {filename_base}.py")
+            else:
+                logging.warning(f"Compaction plugin {filename_base}.py: no callable '{func_name}' found, using default")
+
+        except py_compile.PyCompileError as e:
+            logging.error(f"Compaction plugin {filename_base}.py: syntax error: {e}")
+        except Exception as e:
+            logging.error(f"Compaction plugin {filename_base}.py: failed to load: {type(e).__name__}: {e}")
+
+    COMPACTION_PLUGINS = plugins
+    if plugins:
+        logging.info(f"Compaction plugins loaded: {', '.join(plugins.keys())}")
+
+
 def reload_hot_config():
     """
     Reload all hot-loadable configuration before each cycle:
     1. Prompt files (so Claude's edits take effect immediately)
-    2. Dynamic tools (so new tools in dynamic_tools/enabled/ are available)
-    3. Approved changes (deploy any changes Alex has approved)
+    2. Compaction plugins (so Claude's compaction logic changes take effect)
+    3. Dynamic tools (so new tools in dynamic_tools/enabled/ are available)
+    4. Approved changes (deploy any changes Alex has approved)
     """
     reload_prompts()
+    reload_compaction_plugins()
 
     # Load/reload dynamic tools from dynamic_tools/enabled/
     try:
@@ -359,46 +426,110 @@ def build_messages(state, user_interjection=None):
     return messages
 
 
-def run_compaction(state):
-    """
-    Two-layer compaction:
-    1. Extract insights from oldest segments (replaces direct core compression)
-    2. If insights overflow, integrate oldest 30% into Core Identity
-    """
-    config = state.get("config", {})
+def _default_should_compact(state, segments, config):
+    """Built-in fallback: trigger on total segment token count."""
     token_threshold = config.get("compactionTokenThreshold", 50000)
+    total_tokens = sum(estimate_tokens(s.get("content", "")) for s in segments)
+    if total_tokens >= token_threshold:
+        return True, f"token_threshold ({total_tokens} >= {token_threshold})"
+    return False, None
+
+
+def _default_select_segments(segments, config):
+    """Built-in fallback: oldest segments up to token budget."""
     tokens_to_compact = config.get("tokensToCompact", 10000)
-    # Enforce: tokensToCompact <= 20% of token_threshold
+    token_threshold = config.get("compactionTokenThreshold", 50000)
     max_compact = int(token_threshold * 0.2)
     if tokens_to_compact > max_compact:
         tokens_to_compact = max_compact
-    segments = state.get("segments", [])
+    accumulated = 0
+    count = 0
+    for seg in segments:
+        content = seg.get("content", "") if isinstance(seg, dict) else getattr(seg, "content", "")
+        seg_tokens = estimate_tokens(content)
+        if accumulated + seg_tokens > tokens_to_compact and count > 0:
+            break
+        accumulated += seg_tokens
+        count += 1
+    count = max(1, count)
+    count = min(count, len(segments) - 1)
+    return segments[:count], segments[count:]
 
-    # Token-based compaction trigger
-    total_segment_tokens = sum(
-        estimate_tokens(s.get("content", "")) for s in segments
+
+def _default_format_segments(to_compact, state):
+    """Built-in fallback: [Cycle N] content with --- dividers."""
+    return "\n\n---\n\n".join(
+        f"[Cycle {s['cycle']}] {s['content']}" for s in to_compact
     )
 
-    if total_segment_tokens < token_threshold:
+
+def _default_post_process(raw_insights, compaction_num, compacted_cycles, state):
+    """Built-in fallback: header + raw insights."""
+    if not raw_insights or raw_insights.strip() == "(no new insights)":
+        return ""
+    header = f"### Compaction #{compaction_num} (Cycles {compacted_cycles[0]}-{compacted_cycles[-1]})"
+    return f"{header}\n\n{raw_insights.strip()}"
+
+
+def run_compaction(state):
+    """
+    Two-layer compaction with pluggable pipeline.
+
+    Each stage can be overridden by Claude via scratchpad/compaction/:
+      1. should_compact  — WHEN to trigger (default: token threshold)
+      2. select_segments — WHAT to compact (default: oldest N segments)
+      3. format_segments — HOW to present to the extraction LLM (default: [Cycle N] text)
+      4. post_process    — HOW to structure the output insights (default: ### header + text)
+
+    The engine loads these every cycle. If a plugin is missing or broken,
+    the built-in default is used. Claude can safely experiment.
+
+    Layer 2 (insights overflow → Core Identity integration) remains engine-controlled.
+    """
+    config = state.get("config", {})
+    segments = state.get("segments", [])
+
+    # ── Stage 1: Should we compact? (pluggable) ─────────────────────
+    should_compact_fn = COMPACTION_PLUGINS.get("should_compact", _default_should_compact)
+    try:
+        should, trigger_reason = should_compact_fn(state, segments, config)
+    except Exception as e:
+        logging.error(f"Compaction plugin should_compact crashed: {e}, falling back to default")
+        should, trigger_reason = _default_should_compact(state, segments, config)
+
+    if not should:
         return False
 
-    to_compact_count = select_segments_for_compaction(segments, tokens_to_compact)
-    # Never compact ALL segments — keep at least 1
-    to_compact_count = min(to_compact_count, len(segments) - 1)
+    logging.info(f"Compaction triggered: {trigger_reason}")
 
-    to_compact = segments[:to_compact_count]
-    remaining = segments[to_compact_count:]
+    # ── Stage 2: Select segments to compact (pluggable) ──────────────
+    select_fn = COMPACTION_PLUGINS.get("select_segments", _default_select_segments)
+    try:
+        to_compact, remaining = select_fn(segments, config)
+    except Exception as e:
+        logging.error(f"Compaction plugin select_segments crashed: {e}, falling back to default")
+        to_compact, remaining = _default_select_segments(segments, config)
+
+    # Safety: never compact everything
+    if not remaining:
+        remaining = [to_compact[-1]]
+        to_compact = to_compact[:-1]
+    if not to_compact:
+        return False
 
     compaction_num = state.get("totalCompactions", 0) + 1
     compacted_cycles = [s.get("cycle", "?") for s in to_compact]
 
-    # ── Step 1: Extract insights from segments being compacted ────────
+    # ── Stage 3: Format segments for extraction (pluggable) ──────────
     current_core = state.get("memoryCore", "")
     current_insights = state.get("insights", "")
 
-    thoughts_text = "\n\n---\n\n".join(
-        f"[Cycle {s['cycle']}] {s['content']}" for s in to_compact
-    )
+    format_fn = COMPACTION_PLUGINS.get("format_segments", _default_format_segments)
+    try:
+        thoughts_text = format_fn(to_compact, state)
+    except Exception as e:
+        logging.error(f"Compaction plugin format_segments crashed: {e}, falling back to default")
+        thoughts_text = _default_format_segments(to_compact, state)
 
     # Build extraction prompt from template (editable via cycle_prompts.json)
     extraction_wrapper = CYCLE_PROMPTS.get(
@@ -420,12 +551,20 @@ def run_compaction(state):
     )
     new_insights = response.content[0].text.strip()
 
-    # Append new insights (unless extraction found nothing)
-    if new_insights and new_insights != "(no new insights)":
+    # ── Stage 4: Post-process insights (pluggable) ───────────────────
+    post_fn = COMPACTION_PLUGINS.get("post_process", _default_post_process)
+    try:
+        grouped_block = post_fn(new_insights, compaction_num, compacted_cycles, state)
+    except Exception as e:
+        logging.error(f"Compaction plugin post_process crashed: {e}, falling back to default")
+        grouped_block = _default_post_process(new_insights, compaction_num, compacted_cycles, state)
+
+    # Append to insights layer
+    if grouped_block:
         if current_insights:
-            state["insights"] = current_insights + "\n\n" + new_insights
+            state["insights"] = current_insights + "\n\n" + grouped_block
         else:
-            state["insights"] = new_insights
+            state["insights"] = grouped_block
 
     # Remove compacted segments
     state["segments"] = remaining
@@ -433,7 +572,7 @@ def run_compaction(state):
     state["lastCompactionCycle"] = state.get("totalCycles", 0)
     state["lastCompactedCycles"] = f"{compacted_cycles[0]}-{compacted_cycles[-1]}"
 
-    # ── Step 2: Check if insights overflow → integrate into Core ──────
+    # ── Layer 2: Insights overflow → integrate into Core (engine-controlled) ──
     insights_text = state.get("insights", "")
     max_insights = config.get("insightsMaxChars", 1000)
     overflow_pct = config.get("insightsOverflowPercent", 0.3)
@@ -553,17 +692,12 @@ def run_cycle_internal(state, user_message=None):
     # failure mode where Claude describes tool use in text then hits
     # end_turn without emitting a tool_use block (happens at long context).
     # Claude uses finish_cycle to cleanly exit the tool loop.
-    first_call = True
     api_call_num = 0
     cycle_num = state.get("totalCycles", 0) + 1
     while True:
         api_call_num += 1
-        tool_choice = {"type": "auto"} if first_call else {"type": "any"}
-
-        # Split temperature: use configured temp for creative thought (first call),
-        # low temp for tool continuations to maximize tool-call accuracy.
-        # Research shows up to 10% accuracy improvement at temp 0.0-0.2 for structured output.
-        temp = config.get("temperature", 0.9) if first_call else 0.1
+        tool_choice = {"type": "auto"}
+        temp = config.get("temperature", 0.9)
 
         # Pre-call metrics for logging
         system_chars = len(system)
@@ -589,15 +723,15 @@ def run_cycle_internal(state, user_message=None):
             messages=messages,
             tools=tools_list,
             tool_choice=tool_choice,
-            betas=["context-management-2025-06-27", "tool-search-2025-04-15"],
+            betas=["context-management-2025-06-27"],
             # Automatically clear old tool results when context grows large.
             # Keeps last 3 tool results, excludes working memory tools (state-critical).
             # Research: 29% performance boost, 84% token reduction in long sessions.
             context_management={
                 "edits": [{
                     "type": "clear_tool_uses_20250919",
-                    "trigger": {"type": "token_count", "token_count": 25000},
-                    "keep": {"type": "last_n", "n": 3},
+                    "trigger": {"type": "input_tokens", "value": 25000},
+                    "keep": {"type": "tool_uses", "value": 3},
                     "exclude_tools": [
                         "write_working_memory",
                         "read_working_memory",
@@ -606,8 +740,6 @@ def run_cycle_internal(state, user_message=None):
                 }]
             },
         )
-        first_call = False
-
         # Detailed file logging
         log_api_call(cycle_num, api_call_num, request_info, response, config)
 
@@ -703,11 +835,15 @@ def run_cycle_internal(state, user_message=None):
                     "note": "Result truncated to save context. Use read_file to see full content if needed.",
                 }
                 result_str = json.dumps(truncated_result)
-            tool_results.append({
+            tool_result_entry = {
                 "type": "tool_result",
                 "tool_use_id": block.id,
                 "content": result_str,
-            })
+            }
+            # Mark errors explicitly so the API flags them for Claude
+            if isinstance(result, dict) and "error" in result:
+                tool_result_entry["is_error"] = True
+            tool_results.append(tool_result_entry)
 
         # If finish_cycle was called alongside real tools, execute tools then stop
         if finish_called:
@@ -717,6 +853,17 @@ def run_cycle_internal(state, user_message=None):
                 "result": {"status": "ok", "message": "Cycle complete."},
             })
             break
+
+        # If any tools failed, add a retry nudge so Claude self-corrects
+        has_errors = any(r.get("is_error") for r in tool_results)
+        if has_errors:
+            tool_results.append({
+                "type": "text",
+                "text": (
+                    "[SYSTEM: One or more tool calls failed. Read the error and recovery_hint fields, "
+                    "then retry with corrected parameters. Do not give up — fix the issue and try again.]"
+                ),
+            })
 
         # Append the assistant turn and tool results to continue the loop
         messages.append({"role": "assistant", "content": assistant_content})

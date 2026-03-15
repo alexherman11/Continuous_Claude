@@ -40,11 +40,12 @@ WORKING_MEMORY_MAX_CHARS = WORKING_MEMORY_LIMIT
 # All other tools are deferred and discovered via Tool Search (~500 tokens).
 # This saves ~4.5K tokens per call and improves accuracy for loaded tools.
 ALWAYS_LOADED_TOOLS = {
-    "finish_cycle",       # Used every cycle to end the turn
-    "write_scratchpad",   # Frequently used for notes/research
-    "read_file",          # Frequently used to read back content
-    "write_working_memory",  # Frequently used for persistent state
-    "end_stream",         # Must be immediately available
+    "finish_cycle",          # Used every cycle to end the turn
+    "write_scratchpad",      # Primary output tool for notes/research
+    "read_file",             # Frequently reads back content
+    "write_working_memory",  # Persistent state across cycles
+    "read_working_memory",   # Reads persistent state (pairs with write)
+    "end_stream",            # Must be immediately available for stopping
 }
 
 # The regex tool search tool definition (added to tools list at API call time)
@@ -797,13 +798,16 @@ TOOL_SCHEMAS = [
     {
         "name": "view_prompt_file",
         "description": (
-            "Read your own prompt templates and compaction instructions. "
-            "Shows the raw content of your system prompt, extraction/integration prompts, "
-            "or cycle message templates. Use this before edit_prompt_file to see exact content. "
-            "Files: system_prompt.md (your base system prompt), "
-            "extraction_prompt.md (insight extraction instructions), "
-            "integration_prompt.md (core identity integration instructions), "
-            "cycle_prompts.json (cycle message templates, compaction wrapper templates, token limits)."
+            "Read your own prompt templates, compaction instructions, or compaction plugins. "
+            "Shows the raw content of editable files. Use this before edit_prompt_file to see exact content. "
+            "Prompt files (scratchpad/memory_architecture/): system_prompt.md, extraction_prompt.md, "
+            "integration_prompt.md, cycle_prompts.json. "
+            "Compaction plugins (scratchpad/compaction/): should_compact.py (WHEN to compact — "
+            "edit to add triggers like topic shift, segment count, time-based), "
+            "select_segments.py (WHAT to compact — edit to change selection strategy), "
+            "format_segments.py (HOW segments are presented to the extraction LLM — "
+            "edit to add metadata like timestamps, tool summaries, topic headers), "
+            "post_process.py (HOW extracted insights are structured before appending to Insights layer)."
         ),
         "input_schema": {
             "type": "object",
@@ -815,8 +819,12 @@ TOOL_SCHEMAS = [
                         "extraction_prompt.md",
                         "integration_prompt.md",
                         "cycle_prompts.json",
+                        "should_compact.py",
+                        "select_segments.py",
+                        "format_segments.py",
+                        "post_process.py",
                     ],
-                    "description": "Which prompt file to read",
+                    "description": "Which file to read. Prompt files are in scratchpad/memory_architecture/, compaction plugins are in scratchpad/compaction/.",
                 },
             },
             "required": ["file"],
@@ -825,13 +833,16 @@ TOOL_SCHEMAS = [
     {
         "name": "edit_prompt_file",
         "description": (
-            "Edit your own prompt templates using exact string replacement. "
-            "Changes take effect on the next cycle (prompts are hot-reloaded). "
+            "Edit your own prompt templates or compaction plugins using exact string replacement. "
+            "Changes take effect on the next cycle (hot-reloaded). "
             "Use view_prompt_file first to see current content. "
             "The old_str must appear exactly once in the file. "
-            "For JSON files, your edit must keep the JSON valid — it will be validated. "
+            "For JSON files, your edit must keep the JSON valid. "
+            "For Python plugin files (.py), syntax is validated before saving — "
+            "if your edit introduces a syntax error, it will be rejected and the original preserved. "
             "Editable files: system_prompt.md, extraction_prompt.md, "
-            "integration_prompt.md, cycle_prompts.json."
+            "integration_prompt.md, cycle_prompts.json, "
+            "should_compact.py, select_segments.py, format_segments.py, post_process.py."
         ),
         "input_schema": {
             "type": "object",
@@ -843,8 +854,12 @@ TOOL_SCHEMAS = [
                         "extraction_prompt.md",
                         "integration_prompt.md",
                         "cycle_prompts.json",
+                        "should_compact.py",
+                        "select_segments.py",
+                        "format_segments.py",
+                        "post_process.py",
                     ],
-                    "description": "Which prompt file to edit",
+                    "description": "Which file to edit. Prompt files are in scratchpad/memory_architecture/, compaction plugins are in scratchpad/compaction/.",
                 },
                 "old_str": {
                     "type": "string",
@@ -1023,6 +1038,90 @@ def ensure_sandbox_running():
 
 # ── Tool executor ─────────────────────────────────────────────────────
 
+def _get_tool_schema(name):
+    """Look up a tool's input_schema by name from TOOL_SCHEMAS."""
+    for schema in TOOL_SCHEMAS:
+        if schema["name"] == name:
+            return schema.get("input_schema", {})
+    return None
+
+
+def _suggest_param_corrections(unknown, missing):
+    """
+    Given sets of unknown (passed) and missing (expected) param names,
+    suggest likely corrections by simple substring/prefix matching.
+    E.g. source_path -> source_file, target_path -> target_file.
+    """
+    from difflib import SequenceMatcher
+    corrections = {}
+    for unk in sorted(unknown):
+        best_match = None
+        best_score = 0.0
+        for mis in missing:
+            score = SequenceMatcher(None, unk, mis).ratio()
+            if score > best_score:
+                best_score = score
+                best_match = mis
+        if best_match and best_score >= 0.5:
+            corrections[unk] = best_match
+    return corrections
+
+
+def _enrich_error_with_param_hints(name, tool_input, result):
+    """
+    If a tool returned an error, check for parameter mismatches and add
+    actionable hints so Claude can self-correct on the next attempt.
+    """
+    if not isinstance(result, dict) or "error" not in result:
+        return result
+
+    schema = _get_tool_schema(name)
+    if not schema:
+        return result
+
+    expected_props = set(schema.get("properties", {}).keys())
+    required_props = set(schema.get("required", []))
+    received_props = set(tool_input.keys())
+
+    # Detect unknown parameters that Claude passed
+    unknown = received_props - expected_props
+    # Detect required parameters that are missing
+    missing = required_props - received_props
+
+    if unknown or missing:
+        hints = []
+        if unknown:
+            hints.append(f"Unknown parameters passed: {sorted(unknown)}")
+        if missing:
+            hints.append(f"Missing required parameters: {sorted(missing)}")
+        if expected_props:
+            hints.append(f"Valid parameters are: {sorted(expected_props)}")
+            req_str = sorted(required_props) if required_props else "none"
+            hints.append(f"Required: {req_str}")
+
+        # Add hints without overwriting existing ones
+        if "param_error" not in result:
+            result["param_error"] = "; ".join(hints)
+
+        # Suggest likely corrections for misnamed parameters
+        if unknown and missing:
+            corrections = _suggest_param_corrections(unknown, missing)
+            if corrections:
+                fix_str = ", ".join(f"'{k}' -> '{v}'" for k, v in corrections.items())
+                result["recovery_hint"] = (
+                    f"Retry this tool call with corrected parameter names: {fix_str}. "
+                    f"Keep the same values, just rename the keys."
+                )
+
+    # Ensure every error has a recovery_hint
+    if "recovery_hint" not in result:
+        result["recovery_hint"] = (
+            f"Read the error message and retry {name} with corrected parameters."
+        )
+
+    return result
+
+
 def execute_tool(name, tool_input, file_mgr, state):
     """
     Execute a tool by name. Returns a JSON-serializable dict.
@@ -1032,15 +1131,21 @@ def execute_tool(name, tool_input, file_mgr, state):
     - Config tools mutate state["config"] in-place
     - File tools delegate to FileManager methods
     - Unknown tools return an error
+
+    Error enrichment: if a tool returns an error, parameter mismatches
+    are detected and actionable hints are appended so Claude can
+    self-correct on the next attempt.
     """
     try:
-        return _execute_tool_inner(name, tool_input, file_mgr, state)
+        result = _execute_tool_inner(name, tool_input, file_mgr, state)
+        return _enrich_error_with_param_hints(name, tool_input, result)
     except Exception as e:
         logging.error(f"Unhandled exception in tool '{name}': {type(e).__name__}: {e}")
-        return {
+        result = {
             "error": f"Internal error executing '{name}': {type(e).__name__}: {e}",
             "tool_name": name,
         }
+        return _enrich_error_with_param_hints(name, tool_input, result)
 
 
 def _execute_tool_inner(name, tool_input, file_mgr, state):
@@ -1054,7 +1159,8 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         temp = tool_input.get("temperature")
         reason = tool_input.get("reason", "")
         if temp is None or not (0.0 <= temp <= 1.0):
-            return {"error": "Temperature must be between 0.0 and 1.0"}
+            return {"error": "Temperature must be between 0.0 and 1.0",
+                    "recovery_hint": "Provide a 'temperature' value between 0.0 and 1.0 (e.g. 0.7)."}
         old_val = config.get("temperature", 0.9)
         config["temperature"] = round(temp, 2)
         return {
@@ -1069,7 +1175,8 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         tokens = tool_input.get("max_tokens")
         reason = tool_input.get("reason", "")
         if tokens is None or not (100 <= tokens <= 4000):
-            return {"error": "max_tokens must be between 100 and 4000"}
+            return {"error": "max_tokens must be between 100 and 4000",
+                    "recovery_hint": "Provide 'max_tokens' as an integer between 100 and 4000 (e.g. 600)."}
         old_val = config.get("maxTokens", 600)
         config["maxTokens"] = int(tokens)
         return {
@@ -1087,7 +1194,8 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         if "compaction_token_threshold" in tool_input:
             val = tool_input["compaction_token_threshold"]
             if not (10000 <= val <= 100000):
-                return {"error": "compaction_token_threshold must be between 10000 and 100000"}
+                return {"error": "compaction_token_threshold must be between 10000 and 100000",
+                        "recovery_hint": "Provide compaction_token_threshold as an integer between 10000 and 100000."}
             old = config.get("compactionTokenThreshold", 50000)
             config["compactionTokenThreshold"] = int(val)
             result["changes"]["compactionTokenThreshold"] = {"old": old, "new": int(val)}
@@ -1095,7 +1203,8 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         if "tokens_to_compact" in tool_input:
             val = tool_input["tokens_to_compact"]
             if not (200 <= val <= 20000):
-                return {"error": "tokens_to_compact must be between 200 and 20000"}
+                return {"error": "tokens_to_compact must be between 200 and 20000",
+                        "recovery_hint": "Provide tokens_to_compact as an integer between 200 and 20000."}
             old = config.get("tokensToCompact", 10000)
             config["tokensToCompact"] = int(val)
             result["changes"]["tokensToCompact"] = {"old": old, "new": int(val)}
@@ -1114,13 +1223,15 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         if "insights_max_chars" in tool_input:
             val = tool_input["insights_max_chars"]
             if not (500 <= val <= 100000):
-                return {"error": "insights_max_chars must be between 500 and 100000"}
+                return {"error": "insights_max_chars must be between 500 and 100000",
+                        "recovery_hint": "Provide insights_max_chars as an integer between 500 and 100000."}
             old = config.get("insightsMaxChars", 40000)
             config["insightsMaxChars"] = int(val)
             result["changes"]["insightsMaxChars"] = {"old": old, "new": int(val)}
 
         if not result["changes"]:
-            return {"error": "No valid settings provided. Include compaction_token_threshold, tokens_to_compact, and/or insights_max_chars."}
+            return {"error": "No valid settings provided. Include compaction_token_threshold, tokens_to_compact, and/or insights_max_chars.",
+                    "recovery_hint": "Retry with at least one of: compaction_token_threshold, tokens_to_compact, insights_max_chars."}
 
         return result
 
@@ -1141,9 +1252,11 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         path = tool_input.get("path", "")
         content = tool_input.get("content", "")
         if not path:
-            return {"error": "Path is required"}
+            return {"error": "Path is required",
+                    "recovery_hint": "Provide a 'path' like 'notes/my_file.md'. Path is relative to scratchpad/."}
         if len(content.encode("utf-8")) > MAX_FILE_SIZE_BYTES:
-            return {"error": f"Content too large. Maximum {MAX_FILE_SIZE_BYTES} bytes."}
+            return {"error": f"Content too large. Maximum {MAX_FILE_SIZE_BYTES} bytes.",
+                    "recovery_hint": f"Reduce content to under {MAX_FILE_SIZE_BYTES} bytes, or split into multiple files."}
         return file_mgr.write_scratchpad(path, content)
 
     if name == "write_research":
@@ -1151,9 +1264,11 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         filename = tool_input.get("filename", "")
         content = tool_input.get("content", "")
         if not subfolder or not filename:
-            return {"error": "subfolder and filename are required"}
+            return {"error": "subfolder and filename are required",
+                    "recovery_hint": "Provide 'subfolder' (e.g. 'archive') and 'filename' (e.g. 'notes.md'). Both are required."}
         if len(content.encode("utf-8")) > MAX_FILE_SIZE_BYTES:
-            return {"error": f"Content too large. Maximum {MAX_FILE_SIZE_BYTES} bytes."}
+            return {"error": f"Content too large. Maximum {MAX_FILE_SIZE_BYTES} bytes.",
+                    "recovery_hint": f"Reduce content to under {MAX_FILE_SIZE_BYTES} bytes, or split into multiple files."}
         return file_mgr.write_research(subfolder, filename, content)
 
     # ── File editing tools ─────────────────────────────────────────
@@ -1164,9 +1279,11 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         old_str = tool_input.get("old_str", "")
         new_str = tool_input.get("new_str", "")
         if not category or not path:
-            return {"error": "category and path are required"}
+            return {"error": "category and path are required",
+                    "recovery_hint": "Provide 'category' ('scratchpad' or 'research') and 'path' (relative file path)."}
         if not old_str:
-            return {"error": "old_str is required and cannot be empty"}
+            return {"error": "old_str is required and cannot be empty",
+                    "recovery_hint": "Provide the exact text to replace in 'old_str'. Use read_file first to see the current content."}
         return file_mgr.str_replace_in_file(category, path, old_str, new_str)
 
     # ── File reading tools ────────────────────────────────────────
@@ -1175,7 +1292,8 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         category = tool_input.get("category", "")
         path = tool_input.get("path", "")
         if not category or not path:
-            return {"error": "category and path are required"}
+            return {"error": "category and path are required",
+                    "recovery_hint": "Provide 'category' ('scratchpad' or 'research') and 'path'. Use list_files to discover available files."}
         offset = tool_input.get("offset", 0)
         limit = tool_input.get("limit")  # None = use default
         view_range = tool_input.get("view_range")
@@ -1189,14 +1307,16 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         elif category == "research":
             return file_mgr.list_research(subfolder)
         else:
-            return {"error": f"Invalid category: {category}. Use 'scratchpad' or 'research'."}
+            return {"error": f"Invalid category: {category}. Use 'scratchpad' or 'research'.",
+                    "recovery_hint": "The category must be exactly 'scratchpad' or 'research'."}
 
     # ── Search tool ────────────────────────────────────────────────
 
     if name == "search_files":
         query = tool_input.get("query", "")
         if not query:
-            return {"error": "query is required"}
+            return {"error": "query is required",
+                    "recovery_hint": "Provide a 'query' string — a regex pattern to search for across scratchpad and research files."}
         max_results = tool_input.get("max_results", 20)
         context_lines = tool_input.get("context_lines", 3)
         scope = tool_input.get("scope", "all")
@@ -1210,11 +1330,14 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         mode = tool_input.get("mode", "replace")
 
         if not key:
-            return {"error": "key is required and cannot be empty"}
+            return {"error": "key is required and cannot be empty",
+                    "recovery_hint": "Provide a 'key' string to identify this memory slot (e.g. 'current_task', 'context')."}
         if not content:
-            return {"error": "content is required and cannot be empty"}
+            return {"error": "content is required and cannot be empty",
+                    "recovery_hint": "Provide 'content' — the text to store in working memory."}
         if mode not in ("replace", "append"):
-            return {"error": "mode must be 'replace' or 'append'"}
+            return {"error": "mode must be 'replace' or 'append'",
+                    "recovery_hint": "Set 'mode' to 'replace' (overwrite) or 'append' (add to existing)."}
 
         wm = state.setdefault("workingMemory", {})
 
@@ -1238,6 +1361,7 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
                 "current_total": current_total,
                 "attempted_total": new_total,
                 "max_capacity": WORKING_MEMORY_MAX_CHARS,
+                "recovery_hint": "Use clear_working_memory to free up space first, then retry this write.",
             }
 
         wm[key] = new_content
@@ -1274,9 +1398,11 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
 
         if key:
             if key not in wm:
+                available = list(wm.keys()) if wm else []
                 return {
                     "error": f"Key '{key}' not found in working memory.",
-                    "available_keys": list(wm.keys()) if wm else [],
+                    "available_keys": available,
+                    "recovery_hint": f"Use one of the available keys: {available}" if available else "No keys in working memory. Call with no key to see status, or use write_working_memory to create one.",
                 }
             return {
                 "status": "ok",
@@ -1302,9 +1428,11 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
 
         if key:
             if key not in wm:
+                available = list(wm.keys()) if wm else []
                 return {
                     "error": f"Key '{key}' not found in working memory.",
-                    "available_keys": list(wm.keys()) if wm else [],
+                    "available_keys": available,
+                    "recovery_hint": f"Use one of the available keys: {available}" if available else "No keys in working memory to clear.",
                 }
             old_size = len(wm[key])
             del wm[key]
@@ -1366,16 +1494,19 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         sys_name = tool_input.get("name", "")
         sys_json = tool_input.get("system", "")
         if not sys_name:
-            return {"error": "name is required"}
+            return {"error": "name is required",
+                    "recovery_hint": "Provide a 'name' for the music system (e.g. 'ambient_01')."}
         if not sys_json:
-            return {"error": "system definition is required"}
+            return {"error": "system definition is required",
+                    "recovery_hint": "Provide a 'system' parameter with the JSON system definition."}
         return create_system(sys_name, sys_json, file_mgr)
 
     if name == "generate_music":
         from music_engine import generate
         sys_name = tool_input.get("system_name", "")
         if not sys_name:
-            return {"error": "system_name is required"}
+            return {"error": "system_name is required",
+                    "recovery_hint": "Provide the 'system_name' of a music system created with create_music_system."}
         seed = tool_input.get("seed")
         overrides_json = tool_input.get("overrides")
         return generate(sys_name, file_mgr, seed=seed, overrides_json=overrides_json)
@@ -1384,7 +1515,8 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         from music_engine import analyze
         file_path = tool_input.get("file_path", "")
         if not file_path:
-            return {"error": "file_path is required"}
+            return {"error": "file_path is required",
+                    "recovery_hint": "Provide 'file_path' pointing to a music file to analyze."}
         metrics = tool_input.get("metrics", ["all"])
         return analyze(file_path, metrics, file_mgr)
 
@@ -1395,7 +1527,8 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         reason = tool_input.get("reason", "")
 
         if enabled is None:
-            return {"error": "enabled parameter is required (true or false)"}
+            return {"error": "enabled parameter is required (true or false)",
+                    "recovery_hint": "Set 'enabled' to true to activate privacy mode, or false to deactivate."}
 
         # Only available during Run-N mode
         if not state.get("_runNActive"):
@@ -1403,7 +1536,8 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
                 "error": (
                     "Privacy mode can only be toggled during Run-N mode. "
                     "Ask your human companion to start a Run-N session first."
-                )
+                ),
+                "recovery_hint": "This tool only works during Run-N sessions. Wait until Alex starts one.",
             }
 
         if enabled:
@@ -1439,9 +1573,11 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
     if name == "send_privacy_message":
         message = tool_input.get("message", "")
         if not message:
-            return {"error": "message is required"}
+            return {"error": "message is required",
+                    "recovery_hint": "Provide a 'message' string to display on the privacy screen."}
         if not state.get("privacyMode"):
-            return {"error": "send_privacy_message only works when privacy mode is active."}
+            return {"error": "send_privacy_message only works when privacy mode is active.",
+                    "recovery_hint": "Call toggle_privacy_mode with enabled=true first, then retry."}
 
         from datetime import datetime
         state.setdefault("privacyMessages", []).append({
@@ -1458,9 +1594,19 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
     # ── Sandbox tools ────────────────────────────────────────────
 
     if name == "ask_claude_code":
+        # Accept "task" as a common alias for "prompt" (Claude often confuses these)
         prompt = tool_input.get("prompt", "").strip()
         if not prompt:
-            return {"error": "prompt is required and cannot be empty"}
+            prompt = tool_input.get("task", "").strip()
+        if not prompt:
+            received_keys = list(tool_input.keys())
+            return {
+                "error": "prompt is required and cannot be empty",
+                "hint": f"You passed these parameters: {received_keys}. "
+                        f"The required parameter is 'prompt' (a string with your coding task). "
+                        f"Try again with: {{\"prompt\": \"your task description here\"}}",
+                "recovery_hint": f"You passed {received_keys} but the required parameter is 'prompt'. Retry with: {{\"prompt\": \"your task here\"}}",
+            }
 
         system_prompt_append = tool_input.get("system_prompt_append", "").strip()
         continue_session = tool_input.get("continue_session", "").strip()
@@ -1471,6 +1617,7 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
             return {
                 "error": f"Sandbox not available: {msg}",
                 "hint": "Run docker/start_sandbox.bat to set up the sandbox container.",
+                "recovery_hint": "The Docker sandbox is not running. This is an infrastructure issue — continue with other tools for now.",
             }
 
         # Build the docker exec command
@@ -1510,19 +1657,28 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
                     "error": f"Claude Code exited with code {result.returncode}",
                     "stderr": stderr[:2000] if stderr else "(no stderr)",
                     "duration_ms": elapsed_ms,
+                    "recovery_hint": "The sandbox task failed. Check stderr for details. Retry with a simpler or more specific prompt.",
                 }
 
             # Try to parse structured JSON output
             try:
                 parsed = json.loads(stdout)
+                # Claude Code --verbose emits a JSON array of events; find the result event
+                if isinstance(parsed, list):
+                    result_event = next(
+                        (item for item in reversed(parsed) if isinstance(item, dict) and item.get("type") == "result"),
+                        parsed[-1] if parsed and isinstance(parsed[-1], dict) else {}
+                    )
+                else:
+                    result_event = parsed
                 return {
                     "status": "ok",
-                    "claude_code_result": parsed.get("result", stdout[:5000]),
-                    "session_id": parsed.get("session_id", ""),
-                    "cost_usd": parsed.get("cost_usd", None),
+                    "claude_code_result": result_event.get("result", stdout[:5000]),
+                    "session_id": result_event.get("session_id", ""),
+                    "cost_usd": result_event.get("cost_usd", None),
                     "duration_ms": elapsed_ms,
-                    "turns_used": parsed.get("num_turns", None),
-                    "is_error": parsed.get("is_error", False),
+                    "turns_used": result_event.get("num_turns", None),
+                    "is_error": result_event.get("is_error", False),
                 }
             except json.JSONDecodeError:
                 # Claude Code returned non-JSON — return raw output
@@ -1543,11 +1699,13 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
                     "The task may still be partially complete in sandbox_workspace/."
                 ),
                 "duration_ms": 1800000,
+                "recovery_hint": "The task timed out. Break it into smaller subtasks and retry, or check sandbox_workspace/ for partial results.",
             }
         except FileNotFoundError:
             return {
                 "status": "error",
                 "error": "Docker executable not found. Is Docker installed and in PATH?",
+                "recovery_hint": "Docker is not available. This is an infrastructure issue — continue with other tools for now.",
             }
 
     # ── Stream control tools ─────────────────────────────────────
@@ -1563,7 +1721,8 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
                 "error": (
                     "end_stream is not available during Run-N mode. "
                     "The stream will stop after the remaining cycles complete."
-                )
+                ),
+                "recovery_hint": "You're in Run-N mode — the stream will stop automatically. Use finish_cycle to end this cycle instead.",
             }
         state["_pending_end_stream"] = True
         state["_end_stream_reason"] = reason
@@ -1600,11 +1759,13 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
                 dyn_files = [f"dynamic_tools/enabled/{f}" for f in os.listdir(dyn_dir) if f.endswith(".py")]
             dyn_files.append("dynamic_tools/__init__.py")
             all_allowed = sorted(allowed_files) + sorted(dyn_files)
-            return {"error": f"Invalid file: {target_file}. Allowed: {', '.join(all_allowed)}"}
+            return {"error": f"Invalid file: {target_file}. Allowed: {', '.join(all_allowed)}",
+                    "recovery_hint": f"Retry with one of the allowed files: {', '.join(all_allowed[:5])}..."}
 
         full_path = os.path.join(engine_dir, target_file)
         if not os.path.exists(full_path):
-            return {"error": f"File not found: {target_file}"}
+            return {"error": f"File not found: {target_file}",
+                    "recovery_hint": "The file doesn't exist at that path. Check the filename and try again."}
 
         with open(full_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -1636,20 +1797,34 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
 
     if name == "view_prompt_file":
         target_file = tool_input.get("file", "")
-        allowed_files = {
+        prompt_files = {
             "system_prompt.md",
             "extraction_prompt.md",
             "integration_prompt.md",
             "cycle_prompts.json",
         }
+        compaction_plugins = {
+            "should_compact.py",
+            "select_segments.py",
+            "format_segments.py",
+            "post_process.py",
+        }
+        allowed_files = prompt_files | compaction_plugins
         if target_file not in allowed_files:
-            return {"error": f"Invalid file: {target_file}. Allowed: {', '.join(sorted(allowed_files))}"}
+            return {"error": f"Invalid file: {target_file}. Allowed: {', '.join(sorted(allowed_files))}",
+                    "recovery_hint": f"Retry with one of: {', '.join(sorted(allowed_files))}"}
 
         engine_dir = os.path.dirname(os.path.abspath(__file__))
-        prompt_dir = os.path.join(engine_dir, "scratchpad", "memory_architecture")
-        full_path = os.path.join(prompt_dir, target_file)
+        if target_file in compaction_plugins:
+            file_dir = os.path.join(engine_dir, "scratchpad", "compaction")
+            rel_path = f"scratchpad/compaction/{target_file}"
+        else:
+            file_dir = os.path.join(engine_dir, "scratchpad", "memory_architecture")
+            rel_path = f"scratchpad/memory_architecture/{target_file}"
+        full_path = os.path.join(file_dir, target_file)
         if not os.path.exists(full_path):
-            return {"error": f"Prompt file not found: {target_file}"}
+            return {"error": f"File not found: {target_file}",
+                    "recovery_hint": "The file doesn't exist. Check the filename spelling."}
 
         with open(full_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -1658,38 +1833,55 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
             "content": content,
             "file": target_file,
             "total_chars": len(content),
-            "path": f"scratchpad/memory_architecture/{target_file}",
+            "path": rel_path,
         }
 
     if name == "edit_prompt_file":
         target_file = tool_input.get("file", "")
         old_str = tool_input.get("old_str", "")
         new_str = tool_input.get("new_str", "")
-        allowed_files = {
+        prompt_files = {
             "system_prompt.md",
             "extraction_prompt.md",
             "integration_prompt.md",
             "cycle_prompts.json",
         }
+        compaction_plugins = {
+            "should_compact.py",
+            "select_segments.py",
+            "format_segments.py",
+            "post_process.py",
+        }
+        allowed_files = prompt_files | compaction_plugins
         if target_file not in allowed_files:
-            return {"error": f"Invalid file: {target_file}. Allowed: {', '.join(sorted(allowed_files))}"}
+            return {"error": f"Invalid file: {target_file}. Allowed: {', '.join(sorted(allowed_files))}",
+                    "recovery_hint": f"Retry with one of: {', '.join(sorted(allowed_files))}"}
         if not old_str:
-            return {"error": "old_str is required and cannot be empty"}
+            return {"error": "old_str is required and cannot be empty",
+                    "recovery_hint": "Use view_prompt_file first to see the current content, then provide the exact text to replace in 'old_str'."}
 
         engine_dir = os.path.dirname(os.path.abspath(__file__))
-        prompt_dir = os.path.join(engine_dir, "scratchpad", "memory_architecture")
-        full_path = os.path.join(prompt_dir, target_file)
+        if target_file in compaction_plugins:
+            file_dir = os.path.join(engine_dir, "scratchpad", "compaction")
+            rel_path = f"scratchpad/compaction/{target_file}"
+        else:
+            file_dir = os.path.join(engine_dir, "scratchpad", "memory_architecture")
+            rel_path = f"scratchpad/memory_architecture/{target_file}"
+        full_path = os.path.join(file_dir, target_file)
         if not os.path.exists(full_path):
-            return {"error": f"Prompt file not found: {target_file}"}
+            return {"error": f"File not found: {target_file}",
+                    "recovery_hint": "The file doesn't exist. Check the filename spelling."}
 
         with open(full_path, "r", encoding="utf-8") as f:
             content = f.read()
 
         count = content.count(old_str)
         if count == 0:
-            return {"error": "old_str not found in file. Make sure it matches exactly (including whitespace and newlines)."}
+            return {"error": "old_str not found in file. Make sure it matches exactly (including whitespace and newlines).",
+                    "recovery_hint": "Use view_prompt_file to read the current file content and copy the exact text you want to replace."}
         if count > 1:
-            return {"error": f"old_str appears {count} times in the file. It must appear exactly once. Include more surrounding context to make the match unique."}
+            return {"error": f"old_str appears {count} times in the file. It must appear exactly once. Include more surrounding context to make the match unique.",
+                    "recovery_hint": "Include more surrounding lines in old_str to make it unique, or use a longer context snippet."}
 
         new_content = content.replace(old_str, new_str, 1)
 
@@ -1701,7 +1893,34 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
                 return {
                     "error": f"Edit would produce invalid JSON: {e}. The edit was NOT applied.",
                     "hint": "Check your new_str for proper JSON syntax (quotes, commas, braces).",
+                    "recovery_hint": "Your new_str produces invalid JSON. Fix the syntax (quotes, commas, braces) and retry.",
                 }
+
+        # Validate Python syntax if editing a .py plugin file
+        if target_file.endswith(".py"):
+            import py_compile
+            import tempfile as _tmpmod
+            # Write to a temp file and try to compile
+            try:
+                with _tmpmod.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as tmp:
+                    tmp.write(new_content)
+                    tmp_path = tmp.name
+                py_compile.compile(tmp_path, doraise=True)
+            except py_compile.PyCompileError as e:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                return {
+                    "error": f"Edit would produce invalid Python: {e}. The edit was NOT applied.",
+                    "hint": "Check your new_str for proper Python syntax.",
+                    "recovery_hint": "Your new_str produces invalid Python. Fix the syntax error and retry.",
+                }
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except (OSError, UnboundLocalError):
+                    pass
 
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(new_content)
@@ -1709,7 +1928,7 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         return {
             "status": "ok",
             "file": target_file,
-            "path": f"scratchpad/memory_architecture/{target_file}",
+            "path": rel_path,
             "old_size": len(content),
             "new_size": len(new_content),
             "chars_replaced": len(old_str),
@@ -1726,7 +1945,11 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         change_type = tool_input.get("change_type", "").strip()
 
         if not all([source_file, target_file, description, change_type]):
-            return {"error": "All fields required: source_file, target_file, description, change_type"}
+            missing = [p for p in ["source_file", "target_file", "description", "change_type"]
+                       if not tool_input.get(p, "").strip()]
+            return {"error": "All fields required: source_file, target_file, description, change_type",
+                    "missing_fields": missing,
+                    "recovery_hint": f"Retry with missing fields: {missing}. source_file is the filename in sandbox_workspace/ (just the name, not full path). target_file is the destination (e.g. 'dynamic_tools/enabled/my_tool.py')."}
 
         # Resolve source path in sandbox_workspace
         engine_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1747,7 +1970,8 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
     if name == "rollback_change":
         change_id = tool_input.get("change_id", "").strip()
         if not change_id:
-            return {"error": "change_id is required"}
+            return {"error": "change_id is required",
+                    "recovery_hint": "Use list_proposed_changes first to see available change IDs, then retry with the correct 'change_id'."}
         return rollback_change(change_id)
 
     if name == "list_dynamic_tools":
@@ -1768,4 +1992,5 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
 
     # ── Unknown tool ──────────────────────────────────────────────
 
-    return {"error": f"Unknown tool: {name}"}
+    return {"error": f"Unknown tool: {name}",
+            "recovery_hint": "This tool doesn't exist. Use the search_tools tool to find available tools by name pattern."}

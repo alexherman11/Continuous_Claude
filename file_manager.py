@@ -108,6 +108,12 @@ class FileManager:
         for key in ("tokensToCompact", "insightsMaxChars", "insightsOverflowPercent", "coreMaxChars", "compactionTokenThreshold"):
             if key not in config:
                 config[key] = DEFAULT_CONFIG[key]
+        # Migrate insights to grouped-by-compaction format
+        insights = state.get("insights", "")
+        if insights and not insights.startswith("### Compaction"):
+            compaction_num = state.get("totalCompactions", 0)
+            header = f"### Compactions #1-{compaction_num} (Legacy)"
+            state["insights"] = f"{header}\n\n{insights}"
         # Seed Core Identity if empty (migration from old state)
         if not state.get("memoryCore"):
             state["memoryCore"] = self._seed_core_identity()

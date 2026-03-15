@@ -22,8 +22,9 @@ if %ERRORLEVEL% == 0 (
 
     echo Starting new container...
     :: Load API key from project .env file
+    :: Use 'more' to normalize line endings (strips \r), then parse
     set "API_KEY="
-    for /f "tokens=1,* delims==" %%a in ('type "%PROJECT_DIR%\.env" 2^>nul') do (
+    for /f "tokens=1,* delims==" %%a in ('more "%PROJECT_DIR%\.env"') do (
         if "%%a"=="ANTHROPIC_API_KEY" set "API_KEY=%%b"
     )
 

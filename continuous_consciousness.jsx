@@ -176,8 +176,10 @@ export default function ContinuousConsciousness() {
         setState(prev => ({ ...prev, isRunning: false, isPaused: false }));
       }
 
+      return true;
     } catch (err) {
       setError(err.message);
+      return false;
     } finally {
       setIsGenerating(false);
       setCurrentStream("");
@@ -292,11 +294,12 @@ export default function ContinuousConsciousness() {
     setNCyclesRemaining(0);
   };
 
-  const handleSendMessage = () => {
+  const handleSendMessage = async () => {
     if (!userInput.trim()) return;
     const msg = userInput.trim();
     setUserInput("");
-    runCycle(msg);
+    const ok = await runCycle(msg);
+    if (!ok) setUserInput(msg);  // Restore message on error so user can retry
   };
 
   const handleReset = async () => {

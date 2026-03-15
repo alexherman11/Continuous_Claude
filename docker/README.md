@@ -26,7 +26,9 @@ ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
 
 ### 2. Start the sandbox
 
-From the project root:
+**Important:** Run `start_sandbox.bat` from **PowerShell** or **cmd.exe**, not Git Bash. Git Bash's MSYS path conversion mangles Docker volume mount paths (e.g., `/workspace` becomes `\Program Files\Git\workspace`), which silently breaks file sync between the host and container.
+
+From the project root in PowerShell or cmd:
 
 ```
 docker\start_sandbox.bat
@@ -171,4 +173,4 @@ docker stop code-sandbox && docker rm code-sandbox
 | Firewall script fails | Container needs `--cap-add=NET_ADMIN` (already set in start script) |
 | Claude returns auth errors | Check that `.env` has a valid `ANTHROPIC_API_KEY` |
 | Container won't start | Run `docker\stop_sandbox.bat` first to clean up, then retry |
-| Files not appearing in `sandbox_workspace/` | Ensure Claude is writing to `/workspace` inside the container |
+| Files not appearing in `sandbox_workspace/` | Ensure Claude is writing to `/workspace` inside the container. Also verify mounts with `docker inspect code-sandbox --format '{{json .Mounts}}'` — if destinations show `\Program Files\Git\...` instead of `/workspace`, the container was started from Git Bash. Recreate it from PowerShell or cmd. |
