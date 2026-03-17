@@ -1,0 +1,32 @@
+{
+  "date": "2026-03-17",
+  "daily_budget": 3.0,
+  "cycles": [
+    {
+      "cycle": 454,
+      "timestamp": "2026-03-17T00:26:51.538708",
+      "input_tokens": 31568,
+      "output_tokens": 578,
+      "api_calls": 2,
+      "estimated_cost": 0.1034
+    },
+    {
+      "cycle": 456,
+      "timestamp": "2026-03-17T01:15:55.027383",
+      "input_tokens": 16325,
+      "output_tokens": 669,
+      "api_calls": 1,
+      "estimated_cost": 0.059
+    },
+    {
+      "cycle": 463,
+      "timestamp": "2026-03-17T01:55:00.627311",
+      "input_tokens": 16185,
+      "output_tokens": 801,
+      "api_calls": 1,
+      "estimated_cost": 0.0606
+    }
+  ],
+  "total_spent": 0.223,
+  "total_cycles": 3
+}

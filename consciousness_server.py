@@ -30,7 +30,7 @@ from pdf_importer import (
     parse_memory_core_only,
 )
 from tool_definitions import TOOL_SCHEMAS, execute_tool, MAX_TOOL_CALLS_PER_CYCLE, build_tools_with_search
-from dynamic_tools import load_dynamic_tools
+from dynamic_tools import load_dynamic_tools, get_dynamic_schemas
 from change_manager import apply_approved_changes
 
 # ── Setup ─────────────────────────────────────────────────────────────
@@ -92,7 +92,9 @@ def log_api_call(cycle_num, call_num, request_info, response, config):
             tool_keywords = ["adjust_", "write_", "read_", "finish_cycle", "trigger_",
                              "search_", "list_", "working_memory", "toggle_", "end_stream",
                              "ask_claude_code", "create_music", "generate_music", "analyze_music",
-                             "str_replace", "send_privacy"]
+                             "str_replace", "send_privacy", "tool_search", "propose_code",
+                             "rollback_change", "view_own_code", "edit_prompt", "view_prompt",
+                             "private_journal"]
             mentions_tools = any(kw in text_content for kw in tool_keywords)
 
             if not has_tool_use and mentions_tools:
@@ -290,6 +292,15 @@ def build_system(state):
 {state['memoryCore']}
 === END CORE IDENTITY ==="""
 
+    # Inject operational practices right after core identity (before insights)
+    wm = state.get("workingMemory", {})
+    if "operational_practices" in wm:
+        system += f"""
+
+=== OPERATIONAL PRACTICES ===
+{wm['operational_practices']}
+=== END OPERATIONAL PRACTICES ==="""
+
     # Inject insights layer if any content exists
     insights = state.get("insights", "")
     if insights:
@@ -306,17 +317,20 @@ intermediate — they may eventually be integrated into your Core Identity.)
 ({len(insights):,} / {max_chars:,} characters)
 === END INSIGHTS ==="""
 
-    # Inject working memory if any content exists
-    wm = state.get("workingMemory", {})
-    if wm:
+    # Inject working memory if any content exists (excluding operational_practices, shown above)
+    wm_remaining = {k: v for k, v in wm.items() if k != "operational_practices"}
+    if wm_remaining:
         wm_parts = ["\n\n=== WORKING MEMORY ==="]
         total_chars = 0
-        for key, content in wm.items():
+        for key, content in wm_remaining.items():
             size = len(content)
             total_chars += size
             wm_parts.append(f"\n[{key}] ({size:,} characters)")
             wm_parts.append(content)
             wm_parts.append("")  # blank line separator
+        # Include operational_practices size in the total for accurate reporting
+        op_size = len(wm.get("operational_practices", ""))
+        total_chars += op_size
         wm_parts.append(f"Total: {total_chars:,} / {WORKING_MEMORY_LIMIT:,} characters")
         wm_parts.append("=== END WORKING MEMORY ===")
         system += "\n".join(wm_parts)
@@ -681,10 +695,21 @@ def run_cycle_internal(state, user_message=None):
     tool_actions = []
     tool_call_count = 0
 
+    # Collect dynamic tool names that appear in current context segments.
+    # These tools stay fully loaded (not deferred) as long as their tool
+    # calls remain in the conversation history (i.e. until compaction).
+    dynamic_tool_names = {s["name"] for s in get_dynamic_schemas()}
+    context_active_tools = set()
+    for seg in state.get("segments", []):
+        for action in (seg.get("toolActions") or []):
+            if action.get("tool") in dynamic_tool_names:
+                context_active_tools.add(action["tool"])
+
     # Build tools list with deferred loading + tool search.
     # Always-loaded tools (~1.5K tokens) are sent in full.
     # Deferred tools (~4.5K tokens saved) are discovered via Tool Search.
-    tools_list = build_tools_with_search()
+    # Context-active dynamic tools are also sent in full.
+    tools_list = build_tools_with_search(context_active_tools=context_active_tools)
 
     # ── Tool use loop ─────────────────────────────────────────────
     # First call uses "auto" so Claude generates text naturally.
@@ -693,6 +718,8 @@ def run_cycle_internal(state, user_message=None):
     # end_turn without emitting a tool_use block (happens at long context).
     # Claude uses finish_cycle to cleanly exit the tool loop.
     api_call_num = 0
+    total_input_tokens = 0
+    total_output_tokens = 0
     cycle_num = state.get("totalCycles", 0) + 1
     while True:
         api_call_num += 1
@@ -747,6 +774,9 @@ def run_cycle_internal(state, user_message=None):
         try:
             block_types = [b.type for b in response.content]
             usage = getattr(response, 'usage', None)
+            if usage:
+                total_input_tokens += getattr(usage, 'input_tokens', 0)
+                total_output_tokens += getattr(usage, 'output_tokens', 0)
             usage_str = f"in:{usage.input_tokens}/out:{usage.output_tokens}" if usage else "n/a"
             logging.warning(
                 f"[Cycle API] cycle={cycle_num} call={api_call_num} "
@@ -769,6 +799,15 @@ def run_cycle_internal(state, user_message=None):
                     "id": block.id,
                     "name": block.name,
                     "input": block.input,
+                })
+            elif block.type == "server_tool_use":
+                # Capture server-side tool calls (e.g. tool_search_tool_regex)
+                # so they appear in the UI tool badges
+                logging.info(f"[Cycle API] server_tool_use: {block.name}({json.dumps(getattr(block, 'input', {}))[:200]})")
+                tool_actions.append({
+                    "tool": block.name,
+                    "input": getattr(block, "input", {}),
+                    "result": {"status": "server_handled", "note": "Processed by Anthropic API"},
                 })
 
         # If no tool use, we're done
@@ -940,10 +979,19 @@ def run_cycle_internal(state, user_message=None):
     # Save state
     file_mgr.save_state(state)
 
+    # Drain matrix outbox (messages Claude wants to send via Matrix)
+    matrix_outbox = state.pop("matrixOutbox", [])
+
     result = {
         "segment": segment,
         "compacted": compacted,
         "state": state,
+        "usage": {
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
+            "api_calls": api_call_num,
+        },
+        "matrixOutbox": matrix_outbox,
     }
 
     if end_stream:
@@ -973,12 +1021,13 @@ def run_cycle():
     if privacy_nudge:
         state["_privacyNudge"] = True
 
-    # If privacy mode is on and there are queued messages, consume them
-    if state.get("privacyMode") and state.get("queuedMessages"):
+    # Consume queued messages (from Matrix, web UI, or privacy queue)
+    if state.get("queuedMessages"):
         queued = state["queuedMessages"]
         state["queuedMessages"] = []  # Clear after consuming
         queued_text = "\n".join(
-            f"[Queued message from human: {qm['message']}]" for qm in queued
+            f"[Queued message from {qm.get('source', 'human')}: {qm['message']}]"
+            for qm in queued
         )
         if user_message:
             user_message = f"{queued_text}\n\n{user_message}"
@@ -1304,6 +1353,30 @@ def queue_privacy_message():
     state.setdefault("queuedMessages", []).append({
         "message": message,
         "timestamp": datetime.now().isoformat(),
+    })
+    file_mgr.save_state(state)
+
+    return jsonify({
+        "status": "ok",
+        "queued": len(state["queuedMessages"]),
+    })
+
+
+# ── Message Queue Endpoint ────────────────────────────────────────────
+
+@app.route("/api/queue-message", methods=["POST"])
+def queue_message():
+    """Queue a message to be delivered in Claude's next cycle (works in any mode)."""
+    data = request.get_json() or {}
+    message = data.get("message", "").strip()
+    if not message:
+        return jsonify({"error": "message is required"}), 400
+
+    state = file_mgr.load_state()
+    state.setdefault("queuedMessages", []).append({
+        "message": message,
+        "timestamp": datetime.now().isoformat(),
+        "source": data.get("source", "matrix"),
     })
     file_mgr.save_state(state)
 

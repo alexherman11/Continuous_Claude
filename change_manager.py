@@ -164,7 +164,9 @@ def propose_change(source_path, target_file, description, change_type, cycle=Non
             }
 
     # Validate dynamic tool contract for Tier 1
-    if change_type in ("new_tool", "modify_tool") and source_path.endswith(".py"):
+    # Accept various change_type names that indicate a dynamic tool
+    _tool_change_types = ("new_tool", "modify_tool", "new_dynamic_tool", "modify_dynamic_tool")
+    if (change_type in _tool_change_types or target_file.startswith("dynamic_tools/")) and source_path.endswith(".py"):
         ok, err = _validate_dynamic_tool_contract(source_path)
         validation["contract"] = {"passed": ok, "error": err}
         if not ok:

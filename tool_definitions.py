@@ -46,6 +46,7 @@ ALWAYS_LOADED_TOOLS = {
     "write_working_memory",  # Persistent state across cycles
     "read_working_memory",   # Reads persistent state (pairs with write)
     "end_stream",            # Must be immediately available for stopping
+    "send_matrix_message",   # Communicate with Alex via Matrix
 }
 
 # The regex tool search tool definition (added to tools list at API call time)
@@ -668,6 +669,29 @@ TOOL_SCHEMAS = [
         },
     },
 
+    # ── Matrix messaging tool ──────────────────────────────────────────
+    {
+        "name": "send_matrix_message",
+        "description": (
+            "Send a message to your human companion (Alex) via Matrix. "
+            "The message will be delivered to the Matrix notification room "
+            "and appear on Alex's phone/desktop. Use this to share discoveries, "
+            "ask questions, send status updates, or communicate anything you "
+            "want Alex to see even when he's not watching the stream. "
+            "Messages are queued and sent after the cycle completes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The message to send to Alex via Matrix.",
+                },
+            },
+            "required": ["message"],
+        },
+    },
+
     # ── Sandbox tools ─────────────────────────────────────────────────
     {
         "name": "ask_claude_code",
@@ -969,7 +993,7 @@ TOOL_SCHEMAS = [
 MAX_TOOL_CALLS_PER_CYCLE = 20
 
 
-def build_tools_with_search():
+def build_tools_with_search(context_active_tools=None):
     """
     Build the tools list for the beta API with deferred loading.
     Always-loaded tools are sent in full. All others get defer_loading=True
@@ -977,7 +1001,10 @@ def build_tools_with_search():
     Saves ~4.5K tokens per API call.
 
     Also includes dynamically loaded tools from dynamic_tools/enabled/.
+    Dynamic tools whose tool calls still appear in context segments are
+    kept fully loaded (not deferred) until those segments get compacted.
     """
+    context_active_tools = context_active_tools or set()
     tools = []
     for schema in TOOL_SCHEMAS:
         tool = dict(schema)
@@ -985,10 +1012,11 @@ def build_tools_with_search():
             tool["defer_loading"] = True
         tools.append(tool)
 
-    # Merge dynamic tool schemas (all deferred)
+    # Merge dynamic tool schemas — keep recently-used ones fully loaded
     for schema in get_dynamic_schemas():
         tool = dict(schema)
-        tool["defer_loading"] = True
+        if tool["name"] not in context_active_tools:
+            tool["defer_loading"] = True
         tools.append(tool)
 
     # Add the tool search tool itself
@@ -1589,6 +1617,25 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
             "status": "ok",
             "message": "Message sent to privacy screen.",
             "total_messages": len(state["privacyMessages"]),
+        }
+
+    # ── Matrix messaging ─────────────────────────────────────────
+
+    if name == "send_matrix_message":
+        message = tool_input.get("message", "")
+        if not message:
+            return {"error": "message is required",
+                    "recovery_hint": "Provide a 'message' string to send via Matrix."}
+        from datetime import datetime
+        state.setdefault("matrixOutbox", []).append({
+            "message": message,
+            "cycle": state.get("totalCycles", 0) + 1,
+            "timestamp": datetime.now().isoformat(),
+        })
+        return {
+            "status": "ok",
+            "message": "Message queued for Matrix delivery after this cycle.",
+            "queued_count": len(state["matrixOutbox"]),
         }
 
     # ── Sandbox tools ────────────────────────────────────────────

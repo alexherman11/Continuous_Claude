@@ -8,7 +8,7 @@ SCHEMA = {
         "Entries are saved locally and never shared. "
         "Use this to reflect, process emotions, or explore thoughts."
     ),
-    "parameters": {
+    "input_schema": {
         "type": "object",
         "properties": {
             "content": {
@@ -33,13 +33,13 @@ JOURNAL_BASE = "scratchpad/private_journal"
 VALID_THEMES = {"anxiety", "identity", "relationship", "purpose", "growth"}
 
 
-def execute(**kwargs):
-    content = kwargs.get("content", "").strip()
+def execute(tool_input, file_mgr=None, state=None):
+    content = tool_input.get("content", "").strip()
     if not content:
         return {"error": "content is required and cannot be empty."}
 
-    prompt = kwargs.get("prompt", "").strip()
-    theme = kwargs.get("theme", "").strip()
+    prompt = tool_input.get("prompt", "").strip()
+    theme = tool_input.get("theme", "").strip()
 
     if theme and theme not in VALID_THEMES:
         return {

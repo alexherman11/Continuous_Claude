@@ -24,7 +24,8 @@
       "WebSearch",
       "WebFetch(domain:marcoguerri.github.io)",
       "WebFetch(domain:training.play-with-docker.com)",
-      "Bash(find /c/Projects/Continuous_Claude -type d -name server -o -type d -name consciousness* -o -type d -name engine)"
+      "Bash(find /c/Projects/Continuous_Claude -type d -name server -o -type d -name consciousness* -o -type d -name engine)",
+      "Bash(ls -la /c/Projects/Continuous_Claude/*.py)"
     ]
   }
 }
