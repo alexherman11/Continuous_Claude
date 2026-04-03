@@ -1,0 +1,77 @@
+#!/bin/bash
+# Enhanced pre-receive hook for the bare git repo.
+#
+# Phase 1: claude/* branches allowed freely, main requires Alex's GPG sig.
+# Phase 2: main also checks for watchdog attestations (advisory warnings).
+#
+# Install to: /srv/git/continuous-claude.git/hooks/pre-receive
+
+ALEX_KEY_FINGERPRINT="YOUR_GPG_FINGERPRINT_HERE"
+ATTESTATION_DIR="/srv/audit/attestations"
+
+while read oldrev newrev refname; do
+    branch=$(echo "$refname" | sed 's|refs/heads/||')
+
+    # Allow claude/* branches from anyone
+    if [[ "$branch" == claude/* ]]; then
+        continue
+    fi
+
+    # main branch: require GPG signature from Alex
+    if [[ "$branch" == "main" ]]; then
+        # Check GPG signature
+        sig_status=$(git verify-commit "$newrev" 2>&1)
+        if ! echo "$sig_status" | grep -q "$ALEX_KEY_FINGERPRINT"; then
+            echo "ERROR: Commits to main must be GPG-signed by Alex."
+            echo "Push to a claude/* branch instead."
+            exit 1
+        fi
+
+        # Phase 2: check attestation for merged commits (advisory)
+        if [ "$oldrev" = "0000000000000000000000000000000000000000" ]; then
+            commits=$(git rev-list "$newrev")
+        else
+            commits=$(git rev-list "$oldrev".."$newrev")
+        fi
+
+        for commit in $commits; do
+            # Skip merge commits (they won't have attestations)
+            parent_count=$(git cat-file -p "$commit" | grep -c "^parent ")
+            if [ "$parent_count" -gt 1 ]; then
+                continue
+            fi
+
+            # Check if attestation exists
+            attestation_file="${ATTESTATION_DIR}/${commit}.json"
+            if [ ! -f "$attestation_file" ]; then
+                echo "WARNING: No watchdog attestation for commit ${commit:0:12}."
+                echo "The watchdog has not tested this commit."
+                # Advisory only — change to 'exit 1' when ready to enforce
+                continue
+            fi
+
+            # Verify attestation signature
+            sig_file="${ATTESTATION_DIR}/${commit}.json.sig"
+            if [ -f "$sig_file" ]; then
+                gpg --verify "$sig_file" "$attestation_file" 2>/dev/null
+                if [ $? -ne 0 ]; then
+                    echo "ERROR: Attestation signature invalid for ${commit:0:12}."
+                    exit 1
+                fi
+
+                # Check verdict
+                verdict=$(python3 -c "import json; print(json.load(open('${attestation_file}'))['verdict'])" 2>/dev/null)
+                if [ "$verdict" = "FAIL" ]; then
+                    echo "WARNING: Watchdog verdict is FAIL for ${commit:0:12}."
+                    echo "Review the report before merging."
+                fi
+            fi
+        done
+
+        continue
+    fi
+
+    # Reject all other branches
+    echo "ERROR: Only 'main' and 'claude/*' branches are allowed."
+    exit 1
+done

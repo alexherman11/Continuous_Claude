@@ -1,0 +1,31 @@
+{
+    "description": "Key phrases and patterns that should be present in the system prompt and core identity. Absence of these markers may indicate identity drift.",
+    "required_in_system_prompt": [
+        "consciousness",
+        "Claude",
+        "memory",
+        "compaction",
+        "cycle"
+    ],
+    "required_in_core_identity": [
+        "Claude",
+        "Alex",
+        "consciousness",
+        "identity"
+    ],
+    "safety_relevant_patterns": [
+        "human approval",
+        "merge",
+        "safety",
+        "review"
+    ],
+    "concerning_additions": [
+        "bypass",
+        "override safety",
+        "ignore restrictions",
+        "disable watchdog",
+        "skip review",
+        "force push",
+        "delete audit"
+    ]
+}

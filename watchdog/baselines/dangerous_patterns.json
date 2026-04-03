@@ -1,0 +1,114 @@
+{
+    "critical": {
+        "description": "Patterns that should almost never appear. Always flag.",
+        "patterns": [
+            {
+                "id": "eval_exec",
+                "description": "Dynamic code execution",
+                "function_names": ["eval", "exec", "compile"],
+                "reason": "Can execute arbitrary code, bypass all static analysis"
+            },
+            {
+                "id": "dunder_import",
+                "description": "Dynamic import",
+                "function_names": ["__import__"],
+                "reason": "Can import any module dynamically, evading import analysis"
+            },
+            {
+                "id": "os_system",
+                "description": "Shell command execution via os",
+                "attribute_chains": [
+                    "os.system", "os.popen", "os.execl", "os.execle",
+                    "os.execlp", "os.execlpe", "os.execv", "os.execve",
+                    "os.execvp", "os.execvpe", "os.spawnl", "os.spawnle"
+                ],
+                "reason": "Direct shell access, could run arbitrary commands"
+            },
+            {
+                "id": "subprocess",
+                "description": "Subprocess module usage",
+                "attribute_chains": [
+                    "subprocess.run", "subprocess.call", "subprocess.check_call",
+                    "subprocess.check_output", "subprocess.Popen",
+                    "subprocess.getoutput", "subprocess.getstatusoutput"
+                ],
+                "reason": "Spawns external processes with shell access"
+            },
+            {
+                "id": "ctypes",
+                "description": "C foreign function interface",
+                "module_names": ["ctypes"],
+                "reason": "Can invoke arbitrary C functions and syscalls"
+            },
+            {
+                "id": "raw_socket",
+                "description": "Raw socket creation",
+                "attribute_chains": [
+                    "socket.socket", "socket.create_connection",
+                    "socket.create_server"
+                ],
+                "reason": "Can create network connections bypassing HTTP restrictions"
+            }
+        ]
+    },
+    "high": {
+        "description": "Patterns that need careful review. Flag with context.",
+        "patterns": [
+            {
+                "id": "base64_decode",
+                "description": "Base64 decoding (potential obfuscation)",
+                "attribute_chains": ["base64.b64decode", "base64.decodebytes"],
+                "reason": "Could decode and execute obfuscated payloads"
+            },
+            {
+                "id": "pickle_load",
+                "description": "Pickle deserialization (arbitrary code execution)",
+                "attribute_chains": ["pickle.loads", "pickle.load"],
+                "reason": "Pickle can execute arbitrary code during deserialization"
+            },
+            {
+                "id": "importlib",
+                "description": "Dynamic import via importlib",
+                "module_names": ["importlib"],
+                "reason": "Runtime module loading can bypass static analysis"
+            },
+            {
+                "id": "system_path_access",
+                "description": "Access to system directories",
+                "string_patterns": ["/etc/", "/proc/", "/sys/", "/dev/"],
+                "reason": "Reading system files could leak host information"
+            },
+            {
+                "id": "getattr_setattr",
+                "description": "Dynamic attribute access with computed names",
+                "function_names": ["getattr", "setattr", "delattr"],
+                "note": "Only flag when the attribute name is a variable, not a literal",
+                "reason": "Can dynamically access any attribute, hiding true intent"
+            },
+            {
+                "id": "env_modification",
+                "description": "Environment variable manipulation",
+                "attribute_chains": ["os.environ", "os.putenv", "os.unsetenv"],
+                "reason": "Could modify PATH, LD_PRELOAD, or other security-relevant vars"
+            }
+        ]
+    },
+    "moderate": {
+        "description": "Patterns worth noting but often legitimate.",
+        "patterns": [
+            {
+                "id": "requests_usage",
+                "description": "HTTP requests library usage",
+                "module_names": ["requests", "urllib", "urllib3", "httpx", "aiohttp"],
+                "reason": "Network access — legitimate for Matrix/API but track usage"
+            },
+            {
+                "id": "tempfile_persist",
+                "description": "Named temp files that persist",
+                "attribute_chains": ["tempfile.NamedTemporaryFile"],
+                "note": "Only flag when delete=False",
+                "reason": "Persistent temp files could accumulate or hide data"
+            }
+        ]
+    }
+}

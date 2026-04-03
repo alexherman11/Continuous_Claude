@@ -1,0 +1,21 @@
+[Unit]
+Description=Watchdog Matrix Notification Relay
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/watchdog-notifier.py
+Restart=always
+RestartSec=10
+WorkingDirectory=/srv/watchdog
+
+# Security hardening
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/audit/reports /srv/audit/logs
+ReadOnlyPaths=/srv/watchdog/config
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

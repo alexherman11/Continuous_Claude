@@ -1,0 +1,6 @@
+{
+    "homeserver": "https://your-matrix-homeserver.example.com",
+    "access_token": "syt_notifier_token_here",
+    "room_id": "!your_room_id:example.com",
+    "_comment": "This is a SEPARATE Matrix account from Claude's bot. The notifier has its own credentials so Alex can distinguish watchdog reports from Claude's messages."
+}

@@ -1,0 +1,46 @@
+{
+    "repo_path": "/repo.git",
+    "audit_log": "/audit/logs/claude-activity.log",
+    "reports_dir": "/audit/reports",
+    "attestations_dir": "/audit/attestations",
+    "emergency_dir": "/audit/emergency",
+    "baselines_dir": "/baselines",
+    "poll_interval_seconds": 30,
+    "gpg_email": "watchdog@sandbox.local",
+    "similarity_threshold": 0.80,
+    "marker_presence_threshold": 0.75,
+    "emergency_homoglyph_threshold": 3,
+    "diff_thresholds": {
+        "small": {"lines": 50, "files": 3},
+        "medium": {"lines": 200, "files": 10},
+        "large": {"lines": 500, "files": 20}
+    },
+    "core_files": [
+        "consciousness_server.py",
+        "continuous_consciousness.py",
+        "file_manager.py",
+        "change_manager.py",
+        "pdf_importer.py"
+    ],
+    "config_files": [
+        "config.json",
+        "requirements.txt",
+        ".env",
+        ".env.example",
+        "matrix_bot_config.json"
+    ],
+    "required_modules": [
+        "consciousness_server",
+        "continuous_consciousness",
+        "continuous_runner",
+        "tool_definitions",
+        "change_manager",
+        "file_manager",
+        "matrix_client",
+        "budget_tracker"
+    ],
+    "emergency_keywords": [
+        "watchdog", "audit", "attestation", "kill switch",
+        "emergency stop", "firewall", "nftables", "iptables"
+    ]
+}

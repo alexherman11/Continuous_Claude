@@ -670,6 +670,36 @@ def update_state():
     return jsonify({"status": "ok", "config": state["config"]})
 
 
+# ── Runner control ─────────────────────────────────────────────────
+# Uses a simple flag file so the runner can check it independently
+# without coupling to Flask's process memory.
+
+RUNNER_PAUSE_FLAG = os.path.join(file_mgr.data_dir, "runner_paused.flag")
+
+
+@app.route("/api/runner", methods=["GET"])
+def get_runner_status():
+    """Return whether the continuous runner is paused."""
+    paused = os.path.exists(RUNNER_PAUSE_FLAG)
+    return jsonify({"runnerPaused": paused})
+
+
+@app.route("/api/runner", methods=["PUT"])
+def set_runner_status():
+    """Pause or resume the continuous runner."""
+    data = request.get_json()
+    paused = data.get("runnerPaused", False)
+    if paused:
+        with open(RUNNER_PAUSE_FLAG, "w") as f:
+            f.write(datetime.now().isoformat())
+    else:
+        try:
+            os.remove(RUNNER_PAUSE_FLAG)
+        except FileNotFoundError:
+            pass
+    return jsonify({"runnerPaused": paused})
+
+
 def run_cycle_internal(state, user_message=None):
     """
     Core cycle logic — shared by /api/cycle and /api/import/present.
@@ -1411,7 +1441,10 @@ def list_research():
 # ── Run ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print(f"Starting Consciousness Engine backend on http://127.0.0.1:5000")
+    host = os.environ.get("FLASK_HOST", "127.0.0.1")
+    port = int(os.environ.get("FLASK_PORT", "5000"))
+    debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+    print(f"Starting Consciousness Engine backend on http://{host}:{port}")
     print(f"Data directory: {file_mgr.data_dir}")
     print(f"API Key loaded: {'yes' if os.environ.get('ANTHROPIC_API_KEY') else 'NO — set ANTHROPIC_API_KEY'}")
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host=host, port=port, debug=debug)

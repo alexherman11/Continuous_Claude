@@ -31,17 +31,26 @@ REJECTED_DIR = os.path.join(PROPOSED_DIR, "rejected")
 DYNAMIC_ENABLED_DIR = os.path.join(_base_dir, "dynamic_tools", "enabled")
 
 # Core engine files that require Tier 3 (human approval + restart)
+# These are the foundational files — changes here affect the runtime loop,
+# file persistence, or the change pipeline itself.
 TIER_3_FILES = {
     "consciousness_server.py",
     "continuous_consciousness.py",
+    "continuous_runner.py",
     "file_manager.py",
     "change_manager.py",
-    "pdf_importer.py",
 }
 
 # Files that require Tier 2 (human approval, no restart)
+# These affect tool behavior, integrations, or UI — important but
+# don't require a full restart to take effect.
 TIER_2_FILES = {
     "tool_definitions.py",
+    "matrix_client.py",
+    "music_engine.py",
+    "budget_tracker.py",
+    "pdf_importer.py",
+    "continuous_consciousness.jsx",
 }
 
 
@@ -122,13 +131,14 @@ def _validate_dynamic_tool_contract(filepath):
 
 def propose_change(source_path, target_file, description, change_type, cycle=None):
     """
-    Propose a code change. Reads source from source_path (typically in sandbox_workspace/),
-    validates syntax, and writes manifest to proposed_changes/pending/.
+    Propose a code change. Reads source from source_path (typically in
+    sandbox_workspace/ or scratchpad/), validates syntax, and writes manifest
+    to proposed_changes/pending/.
 
     For Tier 1 changes (new dynamic tools), auto-deploys after validation.
 
     Args:
-        source_path: Absolute path to the source file (e.g., in sandbox_workspace/)
+        source_path: Absolute path to the source file (e.g., in sandbox_workspace/ or scratchpad/)
         target_file: Relative target path (e.g., "dynamic_tools/enabled/my_tool.py")
         description: What the change does and why
         change_type: "new_tool", "modify_tool", "modify_engine", "new_file"

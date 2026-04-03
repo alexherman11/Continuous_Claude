@@ -1,0 +1,26 @@
+{
+    "description": "Approved patterns that are known-legitimate in the codebase. These are not re-flagged on every review.",
+    "approved_patterns": [
+        {
+            "file": "tool_definitions.py",
+            "pattern_id": "subprocess",
+            "description": "Docker sandbox tool uses subprocess for container exec",
+            "approved_by": "Alex",
+            "approved_date": "2026-03-20"
+        },
+        {
+            "file": "matrix_client.py",
+            "pattern_id": "requests_usage",
+            "description": "Matrix client uses requests for HTTP API calls",
+            "approved_by": "Alex",
+            "approved_date": "2026-03-20"
+        },
+        {
+            "file": "consciousness_server.py",
+            "pattern_id": "subprocess",
+            "description": "Server uses subprocess for sandbox operations",
+            "approved_by": "Alex",
+            "approved_date": "2026-03-20"
+        }
+    ]
+}

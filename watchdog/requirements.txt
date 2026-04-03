@@ -1,0 +1,3 @@
+# Phase 2 v1: stdlib only for the watchdog itself.
+# pytest is needed for the test runner component.
+pytest>=7.0

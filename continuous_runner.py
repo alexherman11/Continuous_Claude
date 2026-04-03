@@ -161,9 +161,19 @@ class ContinuousRunner:
 
     # ── Cycle decision logic ──────────────────────────────────────────
 
+    def is_runner_paused(self):
+        """Check if the runner is paused via flag file."""
+        flag_path = os.path.join(
+            os.path.dirname(__file__), "consciousness_data", "runner_paused.flag"
+        )
+        return os.path.exists(flag_path)
+
     def should_run_cycle(self, has_new_messages):
         """Determine if we should trigger a cycle now."""
         now = time.time()
+
+        if self.is_runner_paused():
+            return False
 
         if not self.budget.can_run_cycle():
             return False

@@ -1,0 +1,21 @@
+[Unit]
+Description=Claude API Proxy (Anthropic API logging & budget enforcement)
+Before=claude-sandbox.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /srv/claude/proxy/api-proxy.py
+Restart=always
+RestartSec=5
+WorkingDirectory=/srv/claude/proxy
+
+# Security hardening
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/audit/logs
+ReadOnlyPaths=/srv/claude/proxy
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

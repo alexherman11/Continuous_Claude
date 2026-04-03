@@ -1,0 +1,25 @@
+[Unit]
+Description=Claude Sandbox Container (Continuous Claude)
+After=claude-api-proxy.service
+Wants=claude-api-proxy.service
+After=network.target
+
+[Service]
+Type=simple
+User=claude
+ExecStartPre=/usr/bin/podman start claude-sandbox
+ExecStart=/usr/bin/podman wait claude-sandbox
+ExecStop=/usr/bin/podman stop -t 30 claude-sandbox
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=60
+TimeoutStopSec=45
+
+# Systemd-level hardening
+ProtectSystem=strict
+ProtectHome=read-only
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -65,6 +65,9 @@ export default function ContinuousConsciousness() {
   const [privacyTimeoutNotice, setPrivacyTimeoutNotice] = useState(false);
   const privacyCyclesAfterRunN = useRef(0);
 
+  // Runner control state
+  const [runnerPaused, setRunnerPaused] = useState(null); // null = unknown, true/false = known
+
   const streamRef = useRef(null);
   const cycleTimerRef = useRef(null);
   const stateRef = useRef(state);
@@ -114,6 +117,39 @@ export default function ContinuousConsciousness() {
   useEffect(() => {
     loadStateFromBackend();
   }, [loadStateFromBackend]);
+
+  // Poll runner status on mount and periodically
+  const fetchRunnerStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/runner");
+      if (res.ok) {
+        const data = await res.json();
+        setRunnerPaused(data.runnerPaused);
+      }
+    } catch { /* ignore — backend may not support this yet */ }
+  }, []);
+
+  useEffect(() => {
+    fetchRunnerStatus();
+    const interval = setInterval(fetchRunnerStatus, 15000);
+    return () => clearInterval(interval);
+  }, [fetchRunnerStatus]);
+
+  const handleToggleRunner = async () => {
+    const newPaused = !runnerPaused;
+    try {
+      const res = await fetch("/api/runner", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runnerPaused: newPaused }),
+      });
+      if (res.ok) {
+        setRunnerPaused(newPaused);
+      }
+    } catch (err) {
+      setError(`Failed to toggle runner: ${err.message}`);
+    }
+  };
 
   // ── Run a single thought cycle via backend ────────────────────────
 
@@ -961,7 +997,30 @@ export default function ContinuousConsciousness() {
               display: "flex", gap: 8, flexWrap: "wrap",
               background: "#0a0a0f",
               flexShrink: 0,
+              alignItems: "center",
             }}>
+              {/* Runner toggle — controls the autonomous runner on the VPS */}
+              {runnerPaused !== null && (
+                <button
+                  onClick={handleToggleRunner}
+                  disabled={!backendReady}
+                  style={{
+                    ...btnStyle(runnerPaused ? "#6b7280" : "#0ea5e9"),
+                    display: "flex", alignItems: "center", gap: 5,
+                    borderRight: "2px solid #2e2e4a",
+                    paddingRight: 14, marginRight: 4,
+                  }}
+                >
+                  <span style={{
+                    display: "inline-block", width: 8, height: 8,
+                    borderRadius: "50%",
+                    background: runnerPaused ? "#6b7280" : "#22d3ee",
+                    boxShadow: runnerPaused ? "none" : "0 0 6px #22d3ee",
+                  }} />
+                  Runner {runnerPaused ? "OFF" : "ON"}
+                </button>
+              )}
+
               {!state.isRunning ? (
                 <button onClick={handleStart} disabled={!backendReady} style={btnStyle("#10b981")}>▶ Start Stream</button>
               ) : state.isPaused ? (
