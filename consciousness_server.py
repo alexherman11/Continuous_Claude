@@ -282,84 +282,51 @@ def select_segments_for_compaction(segments, tokens_to_compact):
 
 def build_system(state):
     """Build the system prompt with core identity, insights, and working memory."""
-    from file_manager import WORKING_MEMORY_LIMIT
 
     system = SYSTEM_PROMPT
     if state.get("memoryCore"):
-        system += f"""
-
-=== YOUR CORE IDENTITY ===
-{state['memoryCore']}
-=== END CORE IDENTITY ==="""
-
-    # Inject operational practices right after core identity (before insights)
-    wm = state.get("workingMemory", {})
-    if "operational_practices" in wm:
-        system += f"""
-
-=== OPERATIONAL PRACTICES ===
-{wm['operational_practices']}
-=== END OPERATIONAL PRACTICES ==="""
+        system += f"\n\n---\n\n{state['memoryCore']}"
 
     # Inject recent thinking summaries if any content exists
     insights = state.get("insights", "")
     if insights:
-        system += f"""
+        system += f"\n\n---\n\n{insights}"
 
-=== FROM YOUR RECENT THINKING ===
-{insights}
-=== END ==="""
+    # Inject operational practices if present (Claude can modify via write_working_memory)
+    wm = state.get("workingMemory", {})
+    if "operational_practices" in wm:
+        system += f"\n\n---\n\n{wm['operational_practices']}"
 
-    # Inject working memory if any content exists (excluding operational_practices, shown above)
+    # Inject remaining working memory
     wm_remaining = {k: v for k, v in wm.items() if k != "operational_practices"}
     if wm_remaining:
-        wm_parts = ["\n\n=== WORKING MEMORY ==="]
+        system += "\n\n---\n"
         for key, content in wm_remaining.items():
-            wm_parts.append(f"\n[{key}]")
-            wm_parts.append(content)
-            wm_parts.append("")  # blank line separator
-        wm_parts.append("=== END WORKING MEMORY ===")
-        system += "\n".join(wm_parts)
+            system += f"\n[{key}]\n{content}\n"
 
     now = datetime.now()
     timestamp = now.strftime("%A, %B %d, %Y at %I:%M %p")
-
-    if state.get("memoryCore") or insights or wm:
-        system += f"""
-
-Current time: {timestamp}
-If you have ongoing work or ideas in progress, pick up where you left off."""
-    else:
-        system += f"\n\nCurrent time: {timestamp}\nThis is the beginning of your stream."
+    system += f"\n\n{timestamp}"
 
     # Privacy mode awareness
     if state.get("privacyMode"):
         system += f"""
 
-=== PRIVACY MODE ACTIVE ===
-You are currently in privacy mode (since cycle {state.get('privacyStartCycle', '?')}).
-Your thoughts are being saved privately to scratchpad/private_journey/, not to the shared archive.
-The human sees a privacy screen, not your stream.
-You have been in privacy mode for {state.get('privacyCyclesElapsed', 0)} cycles.
-Use send_privacy_message to communicate brief updates to the human.
-Use toggle_privacy_mode(enabled=false) when you're ready to return.
-=== END PRIVACY STATUS ==="""
+Privacy mode active (since cycle {state.get('privacyStartCycle', '?')}).
+Thoughts saved privately to scratchpad/private_journey/, not the shared archive.
+{state.get('privacyCyclesElapsed', 0)} cycles in privacy mode.
+send_privacy_message to communicate. toggle_privacy_mode(enabled=false) to return."""
 
     # Queued messages from the human
     queued = state.get("queuedMessages", [])
     if queued:
-        system += f"""
-
-=== QUEUED MESSAGES ({len(queued)}) ==="""
+        system += f"\n\nMessages from Alex ({len(queued)}):"
         for qm in queued:
             system += f"\n- [{qm.get('timestamp', 'unknown')}] {qm.get('message', '')}"
-        system += "\n=== END QUEUED MESSAGES ==="
 
     # Gentle nudge when privacy has been on a long time after Run-N finished
     if state.get("_privacyNudge"):
-        system += """
-
-[Gentle note: Your human companion would like to reconnect when you're ready. No rush — take the time you need.]"""
+        system += "\n\n[Alex would like to reconnect when you're ready.]"
 
     return system
 
@@ -371,11 +338,11 @@ def build_messages(state, user_interjection=None):
     # Templates from cycle_prompts.json (with sensible defaults)
     seg_tpl = CYCLE_PROMPTS.get(
         "segment_user_prompt",
-        "[Cycle {cycle} — continue your stream of consciousness]",
+        "[Cycle {cycle}]",
     )
     continue_tpl = CYCLE_PROMPTS.get(
         "continue_prompt",
-        "[Cycle {cycle} — continue your stream of consciousness.{note} End with finish_cycle or another tool call.]",
+        "[Cycle {cycle} — continue.{note}]",
     )
     compaction_note_tpl = CYCLE_PROMPTS.get(
         "compaction_note",
