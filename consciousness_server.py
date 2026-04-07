@@ -37,7 +37,7 @@ from change_manager import apply_approved_changes
 
 load_dotenv()
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=["http://localhost:5173", "http://127.0.0.1:5173"])
 
 # ── API Call Logger ───────────────────────────────────────────────────
 
@@ -110,7 +110,7 @@ def log_api_call(cycle_num, call_num, request_info, response, config):
 client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
 file_mgr = FileManager(base_path=os.path.dirname(os.path.abspath(__file__)))
 
-MODEL = "claude-sonnet-4-5-20250929"
+MODEL = "claude-opus-4-6"
 
 # SYSTEM_PROMPT is loaded from scratchpad/memory_architecture/system_prompt.md
 # (see reload_prompts() below)
@@ -301,37 +301,23 @@ def build_system(state):
 {wm['operational_practices']}
 === END OPERATIONAL PRACTICES ==="""
 
-    # Inject insights layer if any content exists
+    # Inject recent thinking summaries if any content exists
     insights = state.get("insights", "")
     if insights:
-        config = state.get("config", {})
-        max_chars = config.get("insightsMaxChars", 1000)
         system += f"""
 
-=== RECENT INSIGHTS ===
-(Significant insights extracted from your compacted thought cycles. These are
-intermediate — they may eventually be integrated into your Core Identity.)
-
+=== FROM YOUR RECENT THINKING ===
 {insights}
-
-({len(insights):,} / {max_chars:,} characters)
-=== END INSIGHTS ==="""
+=== END ==="""
 
     # Inject working memory if any content exists (excluding operational_practices, shown above)
     wm_remaining = {k: v for k, v in wm.items() if k != "operational_practices"}
     if wm_remaining:
         wm_parts = ["\n\n=== WORKING MEMORY ==="]
-        total_chars = 0
         for key, content in wm_remaining.items():
-            size = len(content)
-            total_chars += size
-            wm_parts.append(f"\n[{key}] ({size:,} characters)")
+            wm_parts.append(f"\n[{key}]")
             wm_parts.append(content)
             wm_parts.append("")  # blank line separator
-        # Include operational_practices size in the total for accurate reporting
-        op_size = len(wm.get("operational_practices", ""))
-        total_chars += op_size
-        wm_parts.append(f"Total: {total_chars:,} / {WORKING_MEMORY_LIMIT:,} characters")
         wm_parts.append("=== END WORKING MEMORY ===")
         system += "\n".join(wm_parts)
 
@@ -342,7 +328,7 @@ intermediate — they may eventually be integrated into your Core Identity.)
         system += f"""
 
 Current time: {timestamp}
-You have completed {state['totalCycles']} thought cycles and currently have {len(state.get('segments', []))} uncompacted segments in context."""
+If you have ongoing work or ideas in progress, pick up where you left off."""
     else:
         system += f"\n\nCurrent time: {timestamp}\nThis is the beginning of your stream."
 
@@ -668,6 +654,36 @@ def update_state():
         state["config"].update(data["config"])
     file_mgr.save_state(state)
     return jsonify({"status": "ok", "config": state["config"]})
+
+
+# ── Runner control ─────────────────────────────────────────────────
+# Uses a simple flag file so the runner can check it independently
+# without coupling to Flask's process memory.
+
+RUNNER_PAUSE_FLAG = os.path.join(file_mgr.data_dir, "runner_paused.flag")
+
+
+@app.route("/api/runner", methods=["GET"])
+def get_runner_status():
+    """Return whether the continuous runner is paused."""
+    paused = os.path.exists(RUNNER_PAUSE_FLAG)
+    return jsonify({"runnerPaused": paused})
+
+
+@app.route("/api/runner", methods=["PUT"])
+def set_runner_status():
+    """Pause or resume the continuous runner."""
+    data = request.get_json()
+    paused = data.get("runnerPaused", False)
+    if paused:
+        with open(RUNNER_PAUSE_FLAG, "w") as f:
+            f.write(datetime.now().isoformat())
+    else:
+        try:
+            os.remove(RUNNER_PAUSE_FLAG)
+        except FileNotFoundError:
+            pass
+    return jsonify({"runnerPaused": paused})
 
 
 def run_cycle_internal(state, user_message=None):
@@ -1055,7 +1071,8 @@ def run_cycle():
         except Exception as recovery_err:
             logging.error(f"[Crash Recovery] Failed: {recovery_err}")
 
-        return jsonify({"error": str(e), "traceback": tb}), 500
+        logging.error(f"Cycle error traceback:\n{tb}")
+        return jsonify({"error": str(e)}), 500
 
     # Clean up transient flags
     state.pop("_runNActive", None)
@@ -1411,7 +1428,10 @@ def list_research():
 # ── Run ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print(f"Starting Consciousness Engine backend on http://127.0.0.1:5000")
+    host = os.environ.get("FLASK_HOST", "127.0.0.1")
+    port = int(os.environ.get("FLASK_PORT", "5000"))
+    debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+    print(f"Starting Consciousness Engine backend on http://{host}:{port}")
     print(f"Data directory: {file_mgr.data_dir}")
     print(f"API Key loaded: {'yes' if os.environ.get('ANTHROPIC_API_KEY') else 'NO — set ANTHROPIC_API_KEY'}")
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host=host, port=port, debug=debug)

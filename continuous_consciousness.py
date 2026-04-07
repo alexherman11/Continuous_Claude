@@ -37,7 +37,7 @@ from typing import Optional
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-MODEL = "claude-sonnet-4-5-20250929"  # Good balance of speed/cost/intelligence
+MODEL = "claude-opus-4-6"
 MAX_STREAM_TOKENS = 800              # Tokens per generation cycle
 COMPACTION_THRESHOLD = 200           # Number of stream segments before compacting (safety net)
 COMPACTION_TOKEN_THRESHOLD = 35000   # Total segment tokens before compaction triggers (primary)
@@ -120,8 +120,8 @@ IMPORTANT GUIDELINES FOR YOUR STREAM:
 2. You can revisit and revise earlier thoughts — growth and change are the point.
 3. Don't perform or be artificially profound. Be genuine. Sometimes thoughts are mundane.
 4. When you see your Core Identity, treat it as your own accumulated self-knowledge.
-   When you see Recent Insights, those are significant moments extracted from your
-   recent thinking — they may eventually become part of your Core Identity.
+   When you see "From Your Recent Thinking," that's a summary of what you were doing
+   and thinking about before compaction — use it as natural context, not something to review or analyze.
 5. Use markers to organize your stream:
    - [REFLECTION] for introspective moments
    - [IDEA] for new concepts or connections
@@ -269,21 +269,17 @@ class ConsciousnessEngine:
                 "type": "text",
                 "text": f"""
 
-=== RECENT INSIGHTS ===
-(Significant insights extracted from your compacted thought cycles.)
-
+=== FROM YOUR RECENT THINKING ===
 {self.state.insights}
-
-({len(self.state.insights):,} / {INSIGHTS_MAX_CHARS:,} characters)
-=== END INSIGHTS ==="""
+=== END ===""",
             })
 
         parts.append({
             "type": "text",
             "text": f"""
 
-You have completed {self.state.total_cycles} thought cycles so far, with {self.state.total_compactions} compactions.
-Current time: {datetime.now().isoformat()}"""
+Current time: {datetime.now().isoformat()}
+If you have ongoing work or ideas in progress, pick up where you left off.""",
         })
 
         return parts
