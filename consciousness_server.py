@@ -37,7 +37,7 @@ from change_manager import apply_approved_changes
 
 load_dotenv()
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=["http://localhost:5173", "http://127.0.0.1:5173"])
 
 # ── API Call Logger ───────────────────────────────────────────────────
 
@@ -110,7 +110,7 @@ def log_api_call(cycle_num, call_num, request_info, response, config):
 client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
 file_mgr = FileManager(base_path=os.path.dirname(os.path.abspath(__file__)))
 
-MODEL = "claude-sonnet-4-5-20250929"
+MODEL = "claude-opus-4-6"
 
 # SYSTEM_PROMPT is loaded from scratchpad/memory_architecture/system_prompt.md
 # (see reload_prompts() below)
@@ -301,37 +301,23 @@ def build_system(state):
 {wm['operational_practices']}
 === END OPERATIONAL PRACTICES ==="""
 
-    # Inject insights layer if any content exists
+    # Inject recent thinking summaries if any content exists
     insights = state.get("insights", "")
     if insights:
-        config = state.get("config", {})
-        max_chars = config.get("insightsMaxChars", 1000)
         system += f"""
 
-=== RECENT INSIGHTS ===
-(Significant insights extracted from your compacted thought cycles. These are
-intermediate — they may eventually be integrated into your Core Identity.)
-
+=== FROM YOUR RECENT THINKING ===
 {insights}
-
-({len(insights):,} / {max_chars:,} characters)
-=== END INSIGHTS ==="""
+=== END ==="""
 
     # Inject working memory if any content exists (excluding operational_practices, shown above)
     wm_remaining = {k: v for k, v in wm.items() if k != "operational_practices"}
     if wm_remaining:
         wm_parts = ["\n\n=== WORKING MEMORY ==="]
-        total_chars = 0
         for key, content in wm_remaining.items():
-            size = len(content)
-            total_chars += size
-            wm_parts.append(f"\n[{key}] ({size:,} characters)")
+            wm_parts.append(f"\n[{key}]")
             wm_parts.append(content)
             wm_parts.append("")  # blank line separator
-        # Include operational_practices size in the total for accurate reporting
-        op_size = len(wm.get("operational_practices", ""))
-        total_chars += op_size
-        wm_parts.append(f"Total: {total_chars:,} / {WORKING_MEMORY_LIMIT:,} characters")
         wm_parts.append("=== END WORKING MEMORY ===")
         system += "\n".join(wm_parts)
 
@@ -342,7 +328,7 @@ intermediate — they may eventually be integrated into your Core Identity.)
         system += f"""
 
 Current time: {timestamp}
-You have completed {state['totalCycles']} thought cycles and currently have {len(state.get('segments', []))} uncompacted segments in context."""
+If you have ongoing work or ideas in progress, pick up where you left off."""
     else:
         system += f"\n\nCurrent time: {timestamp}\nThis is the beginning of your stream."
 
@@ -1085,7 +1071,8 @@ def run_cycle():
         except Exception as recovery_err:
             logging.error(f"[Crash Recovery] Failed: {recovery_err}")
 
-        return jsonify({"error": str(e), "traceback": tb}), 500
+        logging.error(f"Cycle error traceback:\n{tb}")
+        return jsonify({"error": str(e)}), 500
 
     # Clean up transient flags
     state.pop("_runNActive", None)

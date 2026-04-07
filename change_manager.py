@@ -258,6 +258,11 @@ def _deploy_change(change_id, manifest, source_content):
     target_file = manifest["target_file"]
     target_path = os.path.join(_base_dir, target_file)
 
+    # Path traversal guard: resolved path must stay within the project directory
+    resolved = os.path.realpath(target_path)
+    if not resolved.startswith(os.path.realpath(_base_dir) + os.sep):
+        return {"error": f"Path traversal blocked: {target_file} resolves outside project directory"}
+
     # Create git snapshot for rollback
     rollback_commit = _create_git_snapshot(change_id)
 
