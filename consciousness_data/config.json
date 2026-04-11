@@ -1,5 +1,5 @@
 {
-  "maxTokens": 3000,
+  "maxTokens": 4000,
   "pauseBetweenCycles": 10500,
   "compactionThreshold": 70,
   "temperature": 0.9,
