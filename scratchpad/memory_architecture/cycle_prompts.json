@@ -1,9 +1,9 @@
 {
-  "continue_prompt": "[Cycle {cycle} — continue your stream of consciousness.{note} End with finish_cycle or another tool call.]",
-  "compaction_note": " Cycles {compacted} were just compacted. Significant insights were extracted to your Insights layer. All compacted thoughts are preserved in the searchable archive — nothing is lost.",
-  "segment_user_prompt": "[Cycle {cycle} — continue your stream of consciousness]",
-  "max_tokens_injection": "[System note: Your previous response was cut off by the token limit ({max_tokens} tokens). Your thought was incomplete. Consider using adjust_tokens_per_turn to increase your limit, or use finish_cycle to end thoughts cleanly.]",
-  "extraction_wrapper": "{extraction_prompt_base}\n\n---\n\n## CURRENT CORE IDENTITY:\n{current_core}\n\n## CURRENT INSIGHTS LAYER:\n{current_insights}\n\n## SEGMENTS BEING COMPACTED:\n{thoughts_text}\n\n---\n\nExtract significant insights from the segments above. If nothing is genuinely significant, output exactly: (no new insights)",
+  "continue_prompt": "[Cycle {cycle} — continue.{note}]",
+  "compaction_note": "",
+  "segment_user_prompt": "[Cycle {cycle}]",
+  "max_tokens_injection": "[Your previous response was cut off at {max_tokens} tokens. Consider using adjust_tokens_per_turn to increase your limit, or use finish_cycle to end thoughts cleanly.]",
+  "extraction_wrapper": "{extraction_prompt_base}\n\n---\n\n## CURRENT CORE IDENTITY:\n{current_core}\n\n## CURRENT INSIGHTS LAYER:\n{current_insights}\n\n## SEGMENTS BEING COMPACTED:\n{thoughts_text}\n\n---\n\nExtract significant insights from the segments above. If nothing is genuinely significant, output exactly: (no new content)",
   "integration_wrapper": "{integration_prompt_base}\n\n---\n\n## CURRENT CORE IDENTITY:\n{current_core}\n\n## STAGED INSIGHTS FOR EVALUATION:\n{staged_insights}\n\n---\n\nReturn the updated Core Identity. Target ~{core_max_chars} characters.",
   "extraction_max_tokens": 1500,
   "integration_max_tokens": 2000

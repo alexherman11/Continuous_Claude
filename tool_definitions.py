@@ -696,19 +696,19 @@ TOOL_SCHEMAS = [
     {
         "name": "ask_claude_code",
         "description": (
-            "Delegate a coding task to Claude Code, a separate AI coding agent running "
-            "in an isolated Docker sandbox. Claude Code can autonomously read files, "
-            "write code, execute programs, run tests, use bash, and spawn explore "
-            "sub-agents for research — all inside a sandboxed environment with no "
-            "access to your personal files or the consciousness system.\n\n"
+            "Delegate a coding task to Claude Code, a separate AI coding agent. "
+            "Claude Code can autonomously read files, write code, execute programs, "
+            "run tests, use bash, and spawn explore sub-agents for research.\n\n"
+            "In VPS mode: runs directly in the engine directory with full read access "
+            "to all engine files. Output files should go to sandbox_workspace/ for "
+            "the propose_code_change pipeline.\n"
+            "In Docker mode: runs inside an isolated container.\n\n"
             "Communicate in natural language — describe WHAT you want built or "
             "investigated, not HOW to code it. Claude Code will handle implementation "
             "details. There is no turn limit; Claude Code works until the task is done.\n\n"
-            "The sandbox has:\n"
-            "- A /workspace directory where all project files live\n"
-            "- Python 3, Node.js, SQLite, git, and common tools\n"
-            "- Full ability to create, edit, and run files\n"
-            "- Sub-agent spawning for code exploration and research\n\n"
+            "Output files land in sandbox_workspace/. Use propose_code_change to "
+            "deploy them. If Claude Code is unavailable, use write_scratchpad to "
+            "develop code instead — propose_code_change also searches scratchpad/.\n\n"
             "IMPORTANT: This tool blocks your thought cycle until Claude Code finishes. "
             "Complex tasks may take several minutes. Give clear, complete prompts so "
             "Claude Code can work autonomously without back-and-forth.\n\n"
@@ -791,28 +791,35 @@ TOOL_SCHEMAS = [
     {
         "name": "view_own_code",
         "description": (
-            "Read the source code of your own consciousness engine. "
-            "This lets you understand how your cycles work, how compaction is implemented, "
-            "how messages are built, and how tools are dispatched. Read-only access to: "
-            "consciousness_server.py (cycle runner, compaction, API), "
-            "tool_definitions.py (your available tools and execution logic), "
-            "file_manager.py (file I/O and persistence). "
-            "Use view_range to read specific line ranges (max 200 lines per read)."
+            "Read the source code of any file in your own engine directory. "
+            "This lets you understand how your cycles work, how tools are dispatched, "
+            "and inspect any part of your codebase before proposing changes. "
+            "Accepts any .py file in the engine root or subdirectories "
+            "(e.g. 'consciousness_server.py', 'continuous_runner.py', "
+            "'tool_definitions.py', 'change_manager.py', 'file_manager.py', "
+            "'matrix_client.py', 'dynamic_tools/__init__.py', "
+            "'watchdog/src/main.py', 'deploy/proxy/api-proxy.py'). "
+            "Also accepts .json, .md, .sh, .bat, .yml files. "
+            "Use view_range to read specific line ranges (max 500 lines per read)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "file": {
                     "type": "string",
-                    "enum": ["consciousness_server.py", "tool_definitions.py", "file_manager.py"],
-                    "description": "Which engine source file to read",
+                    "description": (
+                        "Relative path to any file in the engine directory. "
+                        "Examples: 'tool_definitions.py', 'watchdog/src/main.py', "
+                        "'dynamic_tools/enabled/example_tool.py'. "
+                        "Use list_engine_files to discover available files."
+                    ),
                 },
                 "view_range": {
                     "type": "array",
                     "items": {"type": "integer"},
                     "description": (
                         "[start_line, end_line] (1-indexed). Omit to read from the beginning. "
-                        "Use -1 for end_line to read to EOF. Max 200 lines per read."
+                        "Use -1 for end_line to read to EOF. Max 500 lines per read."
                     ),
                 },
             },
@@ -898,16 +905,38 @@ TOOL_SCHEMAS = [
         },
     },
 
+    {
+        "name": "list_engine_files",
+        "description": (
+            "List all files in your engine directory, organized by subdirectory. "
+            "Use this to discover what files are available for view_own_code. "
+            "Returns .py, .json, .md, .yml, .sh, .bat, .jsx, .js files."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "subdirectory": {
+                    "type": "string",
+                    "description": (
+                        "Optional subdirectory to list (e.g. 'watchdog/src', 'dynamic_tools'). "
+                        "Omit to list all files in the engine root."
+                    ),
+                },
+            },
+        },
+    },
+
     # ── Self-modification tools (change proposal system) ──────────
 
     {
         "name": "propose_code_change",
         "description": (
-            "Propose a change to your own codebase. Develop the code in the Docker sandbox "
-            "first (via ask_claude_code), then call this to submit it for validation and deployment. "
+            "Propose a change to your own codebase. Develop the code first using "
+            "ask_claude_code (writes to sandbox_workspace/) or write_scratchpad "
+            "(writes to scratchpad/), then call this to submit it for validation "
+            "and deployment. Both directories are searched for the source file.\n\n"
             "Tier 1 changes (new dynamic tools) auto-deploy after validation. "
-            "Tier 2/3 changes (modifying existing tools or engine code) require Alex's approval. "
-            "The source file should be in sandbox_workspace/."
+            "Tier 2/3 changes (modifying existing tools or engine code) require Alex's approval."
         ),
         "input_schema": {
             "type": "object",
@@ -915,8 +944,9 @@ TOOL_SCHEMAS = [
                 "source_file": {
                     "type": "string",
                     "description": (
-                        "Path to the source file in sandbox_workspace/ "
-                        "(e.g., 'my_tool.py'). This file will be read and validated."
+                        "Relative path to the source file. Searched in sandbox_workspace/ "
+                        "first, then scratchpad/. Example: 'my_tool.py' or "
+                        "'code/my_tool.py'. This file will be read and validated."
                     ),
                 },
                 "target_file": {
@@ -1027,12 +1057,44 @@ MAX_FILE_SIZE_BYTES = 500_000  # 500 KB
 
 # ── Sandbox helpers ──────────────────────────────────────────────────
 
+def _is_vps_mode():
+    """Check if running in VPS/container environment (no Docker-in-Docker)."""
+    return os.environ.get("SANDBOX_DISABLED") == "1"
+
+
+def _is_claude_cli_available():
+    """Check if the Claude Code CLI is available on the system PATH."""
+    try:
+        result = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def ensure_sandbox_running():
     """
-    Check if the code-sandbox Docker container is running.
-    If it exists but is stopped, attempt to restart it.
+    Check if a coding environment is available.
+
+    In Docker mode: checks for the code-sandbox container.
+    In VPS mode: checks for the Claude Code CLI directly on the system.
     Returns (running: bool, message: str).
     """
+    if _is_vps_mode():
+        # VPS mode: no Docker, but Claude CLI may be available directly
+        if _is_claude_cli_available():
+            return True, "VPS mode: Claude Code CLI available directly."
+        else:
+            return False, (
+                "VPS mode: Claude Code CLI is not installed. "
+                "Use write_scratchpad to develop code, then propose_code_change "
+                "to submit it. You can also use view_own_code to read engine files "
+                "and edit_prompt_file for prompt/compaction plugin modifications."
+            )
+
+    # Docker mode (local development)
     try:
         result = subprocess.run(
             ["docker", "inspect", "-f", "{{.State.Running}}", "code-sandbox"],
@@ -1658,30 +1720,99 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         system_prompt_append = tool_input.get("system_prompt_append", "").strip()
         continue_session = tool_input.get("continue_session", "").strip()
 
-        # Ensure container is running
+        # Ensure coding environment is available
         running, msg = ensure_sandbox_running()
         if not running:
             return {
-                "error": f"Sandbox not available: {msg}",
-                "hint": "Run docker/start_sandbox.bat to set up the sandbox container.",
-                "recovery_hint": "The Docker sandbox is not running. This is an infrastructure issue — continue with other tools for now.",
+                "error": f"Coding environment not available: {msg}",
+                "hint": (
+                    "Alternative workflow: use write_scratchpad to create your code files, "
+                    "then propose_code_change to submit them for deployment."
+                ),
+                "recovery_hint": (
+                    "Neither Docker sandbox nor Claude CLI is available. "
+                    "Use write_scratchpad to develop code and propose_code_change to deploy it."
+                ),
             }
 
-        # Build the docker exec command
-        cmd = [
-            "docker", "exec", "code-sandbox",
-            "claude",
-            "-p", prompt,
-            "--output-format", "json",
-            "--verbose",
-            "--allowedTools", "Read,Write,Edit,Bash,Glob,Grep,Agent",
-        ]
+        # Determine working directory for Claude Code
+        engine_dir = os.path.dirname(os.path.abspath(__file__))
+        if _is_vps_mode():
+            # VPS mode: run Claude CLI from the engine root so it can see
+            # all engine files. Output files for propose_code_change should
+            # be written to sandbox_workspace/.
+            workspace_dir = engine_dir
+            sandbox_out = os.path.join(engine_dir, "sandbox_workspace")
+            os.makedirs(sandbox_out, exist_ok=True)
 
-        if system_prompt_append:
-            cmd.extend(["--append-system-prompt", system_prompt_append])
+            # System-level context so Claude Code knows the output convention
+            vps_system_context = (
+                "You are working inside the Continuous Claude engine directory. "
+                "You can read any file here to understand the codebase. "
+                "When you create or modify files that should be deployed, "
+                "write them to the sandbox_workspace/ subdirectory. "
+                "Files in sandbox_workspace/ will be picked up by propose_code_change "
+                "for validation and deployment through the tier system. "
+                "Key engine files: consciousness_server.py (cycle runner), "
+                "tool_definitions.py (tools + dispatch), change_manager.py (tier pipeline), "
+                "file_manager.py (persistence), continuous_runner.py (entry point)."
+            )
 
-        if continue_session:
-            cmd.extend(["--resume", continue_session])
+            # Combine with any user-provided system prompt
+            full_system_append = vps_system_context
+            if system_prompt_append:
+                full_system_append += "\n\n" + system_prompt_append
+
+            cmd = [
+                "claude",
+                "-p", prompt,
+                "--output-format", "json",
+                "--verbose",
+                "--allowedTools", "Read,Write,Edit,Bash,Glob,Grep,Agent",
+                "--append-system-prompt", full_system_append,
+            ]
+
+            if continue_session:
+                cmd.extend(["--resume", continue_session])
+
+            # Pass environment with engine root as CWD.
+            # Ensure CLAUDE_HOME and HOME point to a writable directory
+            # (on VPS the rootfs is read-only; Claude CLI writes to $HOME/.claude/).
+            env = os.environ.copy()
+            if "CLAUDE_HOME" not in env:
+                import tempfile
+                claude_home = os.path.join(tempfile.gettempdir(), ".claude-home")
+            else:
+                claude_home = env["CLAUDE_HOME"]
+            os.makedirs(os.path.join(claude_home, ".claude"), exist_ok=True)
+            env["CLAUDE_HOME"] = claude_home
+            # Claude CLI writes to $HOME/.claude/ regardless of CLAUDE_HOME,
+            # so HOME must also point to a writable directory.
+            env["HOME"] = claude_home
+            # Trust the API proxy's self-signed certificate for Node.js
+            proxy_cert = "/usr/local/share/ca-certificates/api-proxy.crt"
+            if os.path.exists(proxy_cert):
+                env["NODE_EXTRA_CA_CERTS"] = proxy_cert
+
+        else:
+            # Docker mode: exec into container
+            workspace_dir = None  # Docker handles its own workspace
+            cmd = [
+                "docker", "exec", "code-sandbox",
+                "claude",
+                "-p", prompt,
+                "--output-format", "json",
+                "--verbose",
+                "--allowedTools", "Read,Write,Edit,Bash,Glob,Grep,Agent",
+            ]
+
+            if system_prompt_append:
+                cmd.extend(["--append-system-prompt", system_prompt_append])
+
+            if continue_session:
+                cmd.extend(["--resume", continue_session])
+
+            env = None  # Use default env for docker exec
 
         start_time = time.time()
 
@@ -1691,6 +1822,8 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
                 capture_output=True,
                 text=True,
                 timeout=1800,  # 30-minute safety net (crash protection only)
+                cwd=workspace_dir,
+                env=env,
             )
 
             elapsed_ms = int((time.time() - start_time) * 1000)
@@ -1704,7 +1837,7 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
                     "error": f"Claude Code exited with code {result.returncode}",
                     "stderr": stderr[:2000] if stderr else "(no stderr)",
                     "duration_ms": elapsed_ms,
-                    "recovery_hint": "The sandbox task failed. Check stderr for details. Retry with a simpler or more specific prompt.",
+                    "recovery_hint": "The coding task failed. Check stderr for details. Retry with a simpler or more specific prompt.",
                 }
 
             # Try to parse structured JSON output
@@ -1726,6 +1859,7 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
                     "duration_ms": elapsed_ms,
                     "turns_used": result_event.get("num_turns", None),
                     "is_error": result_event.get("is_error", False),
+                    "mode": "vps_direct" if _is_vps_mode() else "docker",
                 }
             except json.JSONDecodeError:
                 # Claude Code returned non-JSON — return raw output
@@ -1751,8 +1885,11 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         except FileNotFoundError:
             return {
                 "status": "error",
-                "error": "Docker executable not found. Is Docker installed and in PATH?",
-                "recovery_hint": "Docker is not available. This is an infrastructure issue — continue with other tools for now.",
+                "error": "Claude Code CLI not found. Is it installed and in PATH?",
+                "recovery_hint": (
+                    "Claude CLI is not available. Use write_scratchpad to develop code "
+                    "and propose_code_change to deploy it."
+                ),
             }
 
     # ── Stream control tools ─────────────────────────────────────
@@ -1783,36 +1920,34 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
 
     if name == "view_own_code":
         target_file = tool_input.get("file", "")
-        allowed_files = {
-            "consciousness_server.py",
-            "continuous_consciousness.py",
-            "tool_definitions.py",
-            "file_manager.py",
-            "change_manager.py",
-        }
         engine_dir = os.path.dirname(os.path.abspath(__file__))
 
-        # Also allow dynamic tool files and the dynamic tools loader
-        is_dynamic = (
-            target_file.startswith("dynamic_tools/")
-            and target_file.endswith(".py")
-        )
+        # Allowed extensions for viewing
+        _viewable_exts = {".py", ".json", ".md", ".sh", ".bat", ".yml", ".yaml", ".toml", ".cfg", ".txt", ".jsx", ".js"}
 
-        if target_file not in allowed_files and not is_dynamic:
-            # Build list of available dynamic tool files for the error message
-            dyn_dir = os.path.join(engine_dir, "dynamic_tools", "enabled")
-            dyn_files = []
-            if os.path.isdir(dyn_dir):
-                dyn_files = [f"dynamic_tools/enabled/{f}" for f in os.listdir(dyn_dir) if f.endswith(".py")]
-            dyn_files.append("dynamic_tools/__init__.py")
-            all_allowed = sorted(allowed_files) + sorted(dyn_files)
-            return {"error": f"Invalid file: {target_file}. Allowed: {', '.join(all_allowed)}",
-                    "recovery_hint": f"Retry with one of the allowed files: {', '.join(all_allowed[:5])}..."}
+        # Security: block path traversal
+        if ".." in target_file or target_file.startswith("/") or target_file.startswith("\\"):
+            return {"error": "Path traversal not allowed. Use a relative path within the engine directory.",
+                    "recovery_hint": "Use a simple relative path like 'tool_definitions.py' or 'watchdog/src/main.py'."}
+
+        # Check extension
+        _, ext = os.path.splitext(target_file)
+        if ext.lower() not in _viewable_exts:
+            return {"error": f"File type '{ext}' not viewable. Allowed: {', '.join(sorted(_viewable_exts))}",
+                    "recovery_hint": f"Only these file types can be viewed: {', '.join(sorted(_viewable_exts))}"}
 
         full_path = os.path.join(engine_dir, target_file)
+
+        # Verify resolved path is still within engine_dir (prevents symlink escape)
+        real_path = os.path.realpath(full_path)
+        real_engine = os.path.realpath(engine_dir)
+        if not real_path.startswith(real_engine + os.sep) and real_path != real_engine:
+            return {"error": "File is outside the engine directory.",
+                    "recovery_hint": "Only files within the engine directory are accessible."}
+
         if not os.path.exists(full_path):
             return {"error": f"File not found: {target_file}",
-                    "recovery_hint": "The file doesn't exist at that path. Check the filename and try again."}
+                    "recovery_hint": "The file doesn't exist. Use list_engine_files to discover available files."}
 
         with open(full_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -1839,7 +1974,7 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
             "total_lines": total_lines,
             "view_range": [start, end],
             "lines_shown": len(selected),
-            "note": "Read-only access. Use view_range to navigate. Now includes dynamic tools and change_manager.",
+            "note": "Read-only view. To modify this file, use write_scratchpad + propose_code_change.",
         }
 
     if name == "view_prompt_file":
@@ -1983,6 +2118,67 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
             "note": "Changes will take effect on the next cycle.",
         }
 
+    if name == "list_engine_files":
+        engine_dir = os.path.dirname(os.path.abspath(__file__))
+        subdir = tool_input.get("subdirectory", "").strip()
+        _listable_exts = {".py", ".json", ".md", ".sh", ".bat", ".yml", ".yaml", ".toml", ".cfg", ".txt", ".jsx", ".js"}
+
+        # Data-heavy dirs skipped by default (use subdirectory param to drill into them)
+        _skip_dirs_default = {"consciousness_data", "research", "proposed_changes", "sandbox_workspace"}
+
+        if subdir:
+            # Block path traversal
+            if ".." in subdir or subdir.startswith("/") or subdir.startswith("\\"):
+                return {"error": "Path traversal not allowed.",
+                        "recovery_hint": "Use a relative subdirectory like 'watchdog/src' or 'dynamic_tools'."}
+            scan_dir = os.path.join(engine_dir, subdir)
+            skip_dirs = set()  # Don't skip anything when user explicitly requests a subdir
+        else:
+            scan_dir = engine_dir
+            skip_dirs = _skip_dirs_default
+
+        if not os.path.isdir(scan_dir):
+            return {"error": f"Directory not found: {subdir or '.'}",
+                    "recovery_hint": "Check the subdirectory name. Omit 'subdirectory' to list the engine root."}
+
+        # Collect files grouped by directory
+        files_by_dir = {}
+        for root, dirs, files in os.walk(scan_dir):
+            # Skip hidden dirs, __pycache__, node_modules, .git, and data dirs at root level
+            dirs[:] = [d for d in dirs
+                       if not d.startswith(".")
+                       and d not in ("__pycache__", "node_modules", ".git")
+                       and not (os.path.relpath(root, engine_dir) == "." and d in skip_dirs)]
+            rel_root = os.path.relpath(root, engine_dir).replace("\\", "/")
+            if rel_root == ".":
+                rel_root = "(root)"
+            matched = []
+            for fn in sorted(files):
+                _, ext = os.path.splitext(fn)
+                if ext.lower() in _listable_exts:
+                    if rel_root == "(root)":
+                        matched.append(fn)
+                    else:
+                        matched.append(f"{rel_root}/{fn}")
+            if matched:
+                files_by_dir[rel_root] = matched
+
+        # Flatten for easy consumption
+        all_files = []
+        for dir_files in files_by_dir.values():
+            all_files.extend(dir_files)
+
+        result = {
+            "status": "ok",
+            "total_files": len(all_files),
+            "files_by_directory": files_by_dir,
+            "hint": "Use view_own_code with any of these paths to read file contents.",
+        }
+        if skip_dirs:
+            result["skipped_data_dirs"] = sorted(skip_dirs)
+            result["skipped_note"] = "Data directories skipped by default. Use subdirectory param to browse them."
+        return result
+
     # ── Self-modification tools (change proposal system) ────────
 
     if name == "propose_code_change":
@@ -1996,15 +2192,36 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
                        if not tool_input.get(p, "").strip()]
             return {"error": "All fields required: source_file, target_file, description, change_type",
                     "missing_fields": missing,
-                    "recovery_hint": f"Retry with missing fields: {missing}. source_file is the filename in sandbox_workspace/ (just the name, not full path). target_file is the destination (e.g. 'dynamic_tools/enabled/my_tool.py')."}
+                    "recovery_hint": (
+                        f"Retry with missing fields: {missing}. "
+                        f"source_file is the filename in sandbox_workspace/ or scratchpad/ "
+                        f"(just the relative name, not full path). "
+                        f"target_file is the destination (e.g. 'dynamic_tools/enabled/my_tool.py')."
+                    )}
 
-        # Resolve source path in sandbox_workspace
+        # Resolve source path — search multiple locations
         engine_dir = os.path.dirname(os.path.abspath(__file__))
-        source_path = os.path.join(engine_dir, "sandbox_workspace", source_file)
-        if not os.path.exists(source_path):
+        search_dirs = [
+            ("sandbox_workspace", os.path.join(engine_dir, "sandbox_workspace")),
+            ("scratchpad", os.path.join(engine_dir, "scratchpad")),
+        ]
+
+        source_path = None
+        for dir_name, dir_path in search_dirs:
+            candidate = os.path.join(dir_path, source_file)
+            if os.path.exists(candidate):
+                source_path = candidate
+                break
+
+        if source_path is None:
+            searched = [d[0] for d in search_dirs]
             return {
-                "error": f"Source file not found: sandbox_workspace/{source_file}",
-                "hint": "Use ask_claude_code to develop the file in the sandbox first.",
+                "error": f"Source file not found: {source_file}",
+                "searched_directories": searched,
+                "hint": (
+                    "Write the file first using write_scratchpad (or ask_claude_code for sandbox_workspace), "
+                    "then call propose_code_change with the filename."
+                ),
             }
 
         cycle = state.get("totalCycles", 0)

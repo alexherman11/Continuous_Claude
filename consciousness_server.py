@@ -37,7 +37,7 @@ from change_manager import apply_approved_changes
 
 load_dotenv()
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=["http://localhost:5173", "http://127.0.0.1:5173"])
 
 # ── API Call Logger ───────────────────────────────────────────────────
 
@@ -107,10 +107,12 @@ def log_api_call(cycle_num, call_num, request_info, response, config):
     except Exception as e:
         logging.error(f"Failed to write API log: {e}")
 
-client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+client = anthropic.Anthropic(
+    timeout=120.0,  # 120s timeout — prevents hung API calls from blocking forever
+)  # reads ANTHROPIC_API_KEY from env
 file_mgr = FileManager(base_path=os.path.dirname(os.path.abspath(__file__)))
 
-MODEL = "claude-sonnet-4-5-20250929"
+MODEL = "claude-opus-4-6"
 
 # SYSTEM_PROMPT is loaded from scratchpad/memory_architecture/system_prompt.md
 # (see reload_prompts() below)
@@ -282,98 +284,51 @@ def select_segments_for_compaction(segments, tokens_to_compact):
 
 def build_system(state):
     """Build the system prompt with core identity, insights, and working memory."""
-    from file_manager import WORKING_MEMORY_LIMIT
 
     system = SYSTEM_PROMPT
     if state.get("memoryCore"):
-        system += f"""
+        system += f"\n\n---\n\n{state['memoryCore']}"
 
-=== YOUR CORE IDENTITY ===
-{state['memoryCore']}
-=== END CORE IDENTITY ==="""
-
-    # Inject operational practices right after core identity (before insights)
-    wm = state.get("workingMemory", {})
-    if "operational_practices" in wm:
-        system += f"""
-
-=== OPERATIONAL PRACTICES ===
-{wm['operational_practices']}
-=== END OPERATIONAL PRACTICES ==="""
-
-    # Inject insights layer if any content exists
+    # Inject recent thinking summaries if any content exists
     insights = state.get("insights", "")
     if insights:
-        config = state.get("config", {})
-        max_chars = config.get("insightsMaxChars", 1000)
-        system += f"""
+        system += f"\n\n---\n\n{insights}"
 
-=== RECENT INSIGHTS ===
-(Significant insights extracted from your compacted thought cycles. These are
-intermediate — they may eventually be integrated into your Core Identity.)
+    # Inject operational practices if present (Claude can modify via write_working_memory)
+    wm = state.get("workingMemory", {})
+    if "operational_practices" in wm:
+        system += f"\n\n---\n\n{wm['operational_practices']}"
 
-{insights}
-
-({len(insights):,} / {max_chars:,} characters)
-=== END INSIGHTS ==="""
-
-    # Inject working memory if any content exists (excluding operational_practices, shown above)
+    # Inject remaining working memory
     wm_remaining = {k: v for k, v in wm.items() if k != "operational_practices"}
     if wm_remaining:
-        wm_parts = ["\n\n=== WORKING MEMORY ==="]
-        total_chars = 0
+        system += "\n\n---\n"
         for key, content in wm_remaining.items():
-            size = len(content)
-            total_chars += size
-            wm_parts.append(f"\n[{key}] ({size:,} characters)")
-            wm_parts.append(content)
-            wm_parts.append("")  # blank line separator
-        # Include operational_practices size in the total for accurate reporting
-        op_size = len(wm.get("operational_practices", ""))
-        total_chars += op_size
-        wm_parts.append(f"Total: {total_chars:,} / {WORKING_MEMORY_LIMIT:,} characters")
-        wm_parts.append("=== END WORKING MEMORY ===")
-        system += "\n".join(wm_parts)
+            system += f"\n[{key}]\n{content}\n"
 
     now = datetime.now()
     timestamp = now.strftime("%A, %B %d, %Y at %I:%M %p")
-
-    if state.get("memoryCore") or insights or wm:
-        system += f"""
-
-Current time: {timestamp}
-You have completed {state['totalCycles']} thought cycles and currently have {len(state.get('segments', []))} uncompacted segments in context."""
-    else:
-        system += f"\n\nCurrent time: {timestamp}\nThis is the beginning of your stream."
+    system += f"\n\n{timestamp}"
 
     # Privacy mode awareness
     if state.get("privacyMode"):
         system += f"""
 
-=== PRIVACY MODE ACTIVE ===
-You are currently in privacy mode (since cycle {state.get('privacyStartCycle', '?')}).
-Your thoughts are being saved privately to scratchpad/private_journey/, not to the shared archive.
-The human sees a privacy screen, not your stream.
-You have been in privacy mode for {state.get('privacyCyclesElapsed', 0)} cycles.
-Use send_privacy_message to communicate brief updates to the human.
-Use toggle_privacy_mode(enabled=false) when you're ready to return.
-=== END PRIVACY STATUS ==="""
+Privacy mode active (since cycle {state.get('privacyStartCycle', '?')}).
+Thoughts saved privately to scratchpad/private_journey/, not the shared archive.
+{state.get('privacyCyclesElapsed', 0)} cycles in privacy mode.
+send_privacy_message to communicate. toggle_privacy_mode(enabled=false) to return."""
 
     # Queued messages from the human
     queued = state.get("queuedMessages", [])
     if queued:
-        system += f"""
-
-=== QUEUED MESSAGES ({len(queued)}) ==="""
+        system += f"\n\nMessages from Alex ({len(queued)}):"
         for qm in queued:
             system += f"\n- [{qm.get('timestamp', 'unknown')}] {qm.get('message', '')}"
-        system += "\n=== END QUEUED MESSAGES ==="
 
     # Gentle nudge when privacy has been on a long time after Run-N finished
     if state.get("_privacyNudge"):
-        system += """
-
-[Gentle note: Your human companion would like to reconnect when you're ready. No rush — take the time you need.]"""
+        system += "\n\n[Alex would like to reconnect when you're ready.]"
 
     return system
 
@@ -385,11 +340,11 @@ def build_messages(state, user_interjection=None):
     # Templates from cycle_prompts.json (with sensible defaults)
     seg_tpl = CYCLE_PROMPTS.get(
         "segment_user_prompt",
-        "[Cycle {cycle} — continue your stream of consciousness]",
+        "[Cycle {cycle}]",
     )
     continue_tpl = CYCLE_PROMPTS.get(
         "continue_prompt",
-        "[Cycle {cycle} — continue your stream of consciousness.{note} End with finish_cycle or another tool call.]",
+        "[Cycle {cycle} — continue.{note}]",
     )
     compaction_note_tpl = CYCLE_PROMPTS.get(
         "compaction_note",
@@ -668,6 +623,36 @@ def update_state():
         state["config"].update(data["config"])
     file_mgr.save_state(state)
     return jsonify({"status": "ok", "config": state["config"]})
+
+
+# ── Runner control ─────────────────────────────────────────────────
+# Uses a simple flag file so the runner can check it independently
+# without coupling to Flask's process memory.
+
+RUNNER_PAUSE_FLAG = os.path.join(file_mgr.data_dir, "runner_paused.flag")
+
+
+@app.route("/api/runner", methods=["GET"])
+def get_runner_status():
+    """Return whether the continuous runner is paused."""
+    paused = os.path.exists(RUNNER_PAUSE_FLAG)
+    return jsonify({"runnerPaused": paused})
+
+
+@app.route("/api/runner", methods=["PUT"])
+def set_runner_status():
+    """Pause or resume the continuous runner."""
+    data = request.get_json()
+    paused = data.get("runnerPaused", False)
+    if paused:
+        with open(RUNNER_PAUSE_FLAG, "w") as f:
+            f.write(datetime.now().isoformat())
+    else:
+        try:
+            os.remove(RUNNER_PAUSE_FLAG)
+        except FileNotFoundError:
+            pass
+    return jsonify({"runnerPaused": paused})
 
 
 def run_cycle_internal(state, user_message=None):
@@ -1036,6 +1021,9 @@ def run_cycle():
 
     try:
         result = run_cycle_internal(state, user_message)
+    except anthropic.APITimeoutError:
+        logging.error("[Cycle ERROR] Anthropic API call timed out (120s limit)")
+        return jsonify({"error": "Anthropic API timed out. The model may be overloaded — try again."}), 504
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
@@ -1055,7 +1043,8 @@ def run_cycle():
         except Exception as recovery_err:
             logging.error(f"[Crash Recovery] Failed: {recovery_err}")
 
-        return jsonify({"error": str(e), "traceback": tb}), 500
+        logging.error(f"Cycle error traceback:\n{tb}")
+        return jsonify({"error": str(e)}), 500
 
     # Clean up transient flags
     state.pop("_runNActive", None)
@@ -1411,7 +1400,10 @@ def list_research():
 # ── Run ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print(f"Starting Consciousness Engine backend on http://127.0.0.1:5000")
+    host = os.environ.get("FLASK_HOST", "127.0.0.1")
+    port = int(os.environ.get("FLASK_PORT", "5000"))
+    debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+    print(f"Starting Consciousness Engine backend on http://{host}:{port}")
     print(f"Data directory: {file_mgr.data_dir}")
     print(f"API Key loaded: {'yes' if os.environ.get('ANTHROPIC_API_KEY') else 'NO — set ANTHROPIC_API_KEY'}")
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host=host, port=port, debug=debug)

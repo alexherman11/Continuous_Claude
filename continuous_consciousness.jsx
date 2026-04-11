@@ -52,6 +52,9 @@ export default function ContinuousConsciousness() {
   const [nCyclesRemaining, setNCyclesRemaining] = useState(0);
   const nCyclesRef = useRef(0);
 
+  // Abort controller for in-flight cycle requests
+  const cycleAbortRef = useRef(null);
+
   // Start-stream message state
   const [startMessage, setStartMessage] = useState(null);
 
@@ -64,6 +67,9 @@ export default function ContinuousConsciousness() {
   const [privacyQueuedCount, setPrivacyQueuedCount] = useState(0);
   const [privacyTimeoutNotice, setPrivacyTimeoutNotice] = useState(false);
   const privacyCyclesAfterRunN = useRef(0);
+
+  // Runner control state
+  const [runnerPaused, setRunnerPaused] = useState(null); // null = unknown, true/false = known
 
   const streamRef = useRef(null);
   const cycleTimerRef = useRef(null);
@@ -115,13 +121,61 @@ export default function ContinuousConsciousness() {
     loadStateFromBackend();
   }, [loadStateFromBackend]);
 
+  // Poll runner status on mount and periodically
+  const fetchRunnerStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/runner");
+      if (res.ok) {
+        const data = await res.json();
+        setRunnerPaused(data.runnerPaused);
+      }
+    } catch { /* ignore — backend may not support this yet */ }
+  }, []);
+
+  useEffect(() => {
+    fetchRunnerStatus();
+    const interval = setInterval(fetchRunnerStatus, 15000);
+    return () => clearInterval(interval);
+  }, [fetchRunnerStatus]);
+
+  const handleToggleRunner = async () => {
+    const newPaused = !runnerPaused;
+    try {
+      const res = await fetch("/api/runner", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runnerPaused: newPaused }),
+      });
+      if (res.ok) {
+        setRunnerPaused(newPaused);
+      }
+    } catch (err) {
+      setError(`Failed to toggle runner: ${err.message}`);
+    }
+  };
+
   // ── Run a single thought cycle via backend ────────────────────────
+
+  const cancelCycle = useCallback(() => {
+    if (cycleAbortRef.current) {
+      cycleAbortRef.current.abort();
+      cycleAbortRef.current = null;
+    }
+    setIsGenerating(false);
+    setCurrentStream("");
+    setError("Cycle cancelled.");
+  }, []);
 
   const runCycle = useCallback(async (userInterjection) => {
     if (isGenerating) return;
     setIsGenerating(true);
     setCurrentStream("");
     setError(null);
+
+    // AbortController for manual cancellation only (no auto-timeout —
+    // cycles with tool use routinely exceed 90s and shouldn't be cut off)
+    const controller = new AbortController();
+    cycleAbortRef.current = controller;
 
     try {
       const body = {};
@@ -139,6 +193,7 @@ export default function ContinuousConsciousness() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
 
       if (!res.ok) {
@@ -178,9 +233,14 @@ export default function ContinuousConsciousness() {
 
       return true;
     } catch (err) {
-      setError(err.message);
+      if (err.name === "AbortError") {
+        setError("Cycle cancelled. The backend may still be processing — wait a moment before retrying.");
+      } else {
+        setError(err.message);
+      }
       return false;
     } finally {
+      cycleAbortRef.current = null;
       setIsGenerating(false);
       setCurrentStream("");
     }
@@ -693,6 +753,16 @@ export default function ContinuousConsciousness() {
                         <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>◐</span>
                         thinking
                       </span>
+                      <span>·</span>
+                      <button
+                        onClick={cancelCycle}
+                        style={{
+                          background: "none", border: "1px solid #ef4444", color: "#ef4444",
+                          borderRadius: 4, padding: "1px 8px", cursor: "pointer", fontSize: 11,
+                        }}
+                      >
+                        cancel
+                      </button>
                     </>
                   )}
                 </div>
@@ -961,7 +1031,30 @@ export default function ContinuousConsciousness() {
               display: "flex", gap: 8, flexWrap: "wrap",
               background: "#0a0a0f",
               flexShrink: 0,
+              alignItems: "center",
             }}>
+              {/* Runner toggle — controls the autonomous runner on the VPS */}
+              {runnerPaused !== null && (
+                <button
+                  onClick={handleToggleRunner}
+                  disabled={!backendReady}
+                  style={{
+                    ...btnStyle(runnerPaused ? "#6b7280" : "#0ea5e9"),
+                    display: "flex", alignItems: "center", gap: 5,
+                    borderRight: "2px solid #2e2e4a",
+                    paddingRight: 14, marginRight: 4,
+                  }}
+                >
+                  <span style={{
+                    display: "inline-block", width: 8, height: 8,
+                    borderRadius: "50%",
+                    background: runnerPaused ? "#6b7280" : "#22d3ee",
+                    boxShadow: runnerPaused ? "none" : "0 0 6px #22d3ee",
+                  }} />
+                  Runner {runnerPaused ? "OFF" : "ON"}
+                </button>
+              )}
+
               {!state.isRunning ? (
                 <button onClick={handleStart} disabled={!backendReady} style={btnStyle("#10b981")}>▶ Start Stream</button>
               ) : state.isPaused ? (
