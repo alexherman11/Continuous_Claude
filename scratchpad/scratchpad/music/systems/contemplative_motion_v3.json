@@ -1,0 +1,118 @@
+{
+  "global": {
+    "tempo": 66,
+    "root": "F",
+    "scale": "minor",
+    "measures": 12,
+    "octave_range": [
+      4,
+      5
+    ],
+    "time_signature": [
+      4,
+      4
+    ]
+  },
+  "note_selection": {
+    "method": "markov_chain",
+    "markov_chain": {
+      "start_on": "root",
+      "transitions": {
+        "0": {
+          "3": 0.4,
+          "5": 0.3,
+          "8": 0.3
+        },
+        "3": {
+          "5": 0.4,
+          "0": 0.3,
+          "8": 0.3
+        },
+        "5": {
+          "3": 0.3,
+          "8": 0.4,
+          "0": 0.3
+        },
+        "8": {
+          "10": 0.35,
+          "5": 0.35,
+          "0": 0.3
+        },
+        "10": {
+          "8": 0.4,
+          "0": 0.4,
+          "5": 0.2
+        }
+      }
+    }
+  },
+  "rhythm": {
+    "durations": [
+      0.5,
+      1.0,
+      1.5,
+      2.0,
+      3.0
+    ],
+    "duration_weights": [
+      0.15,
+      0.35,
+      0.25,
+      0.2,
+      0.05
+    ]
+  },
+  "dynamics": {
+    "base_velocity": 60,
+    "velocity_range": [
+      50,
+      75
+    ],
+    "accent_beats": [
+      1
+    ],
+    "accent_boost": 8,
+    "fade_in_measures": 2,
+    "fade_out_measures": 2
+  },
+  "structure": {
+    "phrases": [
+      {
+        "label": "A",
+        "measures": [
+          1,
+          3
+        ],
+        "density": 0.4
+      },
+      {
+        "label": "B",
+        "measures": [
+          4,
+          7
+        ],
+        "density": 0.7
+      },
+      {
+        "label": "A'",
+        "measures": [
+          8,
+          10
+        ],
+        "density": 0.5
+      },
+      {
+        "label": "Coda",
+        "measures": [
+          11,
+          12
+        ],
+        "density": 0.2
+      }
+    ]
+  },
+  "name": "contemplative_motion_v3",
+  "version": 1,
+  "created_at": "2026-02-22T02:40:09.058949",
+  "updated_at": "2026-02-22T02:40:09.058949"
+}
