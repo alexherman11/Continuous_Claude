@@ -172,10 +172,10 @@ export default function ContinuousConsciousness() {
     setCurrentStream("");
     setError(null);
 
-    // Create abort controller with 90-second timeout
+    // AbortController for manual cancellation only (no auto-timeout —
+    // cycles with tool use routinely exceed 90s and shouldn't be cut off)
     const controller = new AbortController();
     cycleAbortRef.current = controller;
-    const timeoutId = setTimeout(() => controller.abort(), 90000);
 
     try {
       const body = {};
@@ -234,13 +234,12 @@ export default function ContinuousConsciousness() {
       return true;
     } catch (err) {
       if (err.name === "AbortError") {
-        setError("Cycle timed out or was cancelled. The backend may still be processing — try again in a moment.");
+        setError("Cycle cancelled. The backend may still be processing — wait a moment before retrying.");
       } else {
         setError(err.message);
       }
       return false;
     } finally {
-      clearTimeout(timeoutId);
       cycleAbortRef.current = null;
       setIsGenerating(false);
       setCurrentStream("");
@@ -511,15 +510,11 @@ export default function ContinuousConsciousness() {
     setImportError(null);
 
     try {
-      const presentController = new AbortController();
-      const presentTimeout = setTimeout(() => presentController.abort(), 90000);
       const res = await fetch("/api/import/present", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ importId, chunkIndex, chunkSize: 4000 }),
-        signal: presentController.signal,
       });
-      clearTimeout(presentTimeout);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || `Present failed: ${res.status}`);
