@@ -1,0 +1,129 @@
+{
+  "system_name": "melodic_flow",
+  "system_version": 1,
+  "output_version": 1,
+  "seed": null,
+  "generated_at": "2026-02-22T02:12:23.297226",
+  "global": {
+    "tempo": 72,
+    "root": "D",
+    "scale": "minor",
+    "total_measures": 8,
+    "total_beats": 32
+  },
+  "notes": [
+    {
+      "pitch": 81,
+      "start": 2.0,
+      "duration": 1.0,
+      "velocity": 75
+    },
+    {
+      "pitch": 79,
+      "start": 3.0,
+      "duration": 2.0,
+      "velocity": 78
+    },
+    {
+      "pitch": 77,
+      "start": 5.0,
+      "duration": 2.0,
+      "velocity": 90
+    },
+    {
+      "pitch": 62,
+      "start": 7.0,
+      "duration": 1.0,
+      "velocity": 84
+    },
+    {
+      "pitch": 69,
+      "start": 8.0,
+      "duration": 2.0,
+      "velocity": 92
+    },
+    {
+      "pitch": 70,
+      "start": 10.0,
+      "duration": 1.0,
+      "velocity": 77
+    },
+    {
+      "pitch": 79,
+      "start": 11.0,
+      "duration": 1.0,
+      "velocity": 87
+    },
+    {
+      "pitch": 81,
+      "start": 14.0,
+      "duration": 1.0,
+      "velocity": 79
+    },
+    {
+      "pitch": 74,
+      "start": 17.0,
+      "duration": 2.0,
+      "velocity": 72
+    },
+    {
+      "pitch": 81,
+      "start": 20.0,
+      "duration": 1.0,
+      "velocity": 87
+    },
+    {
+      "pitch": 70,
+      "start": 21.0,
+      "duration": 1.0,
+      "velocity": 82
+    },
+    {
+      "pitch": 84,
+      "start": 23.0,
+      "duration": 1.0,
+      "velocity": 81
+    },
+    {
+      "pitch": 81,
+      "start": 24.0,
+      "duration": 2.0,
+      "velocity": 103
+    },
+    {
+      "pitch": 79,
+      "start": 26.0,
+      "duration": 1.0,
+      "velocity": 84
+    },
+    {
+      "pitch": 74,
+      "start": 27.0,
+      "duration": 2.0,
+      "velocity": 90
+    },
+    {
+      "pitch": 76,
+      "start": 30.0,
+      "duration": 1.0,
+      "velocity": 78
+    },
+    {
+      "pitch": 77,
+      "start": 31.0,
+      "duration": 1.0,
+      "velocity": 73
+    }
+  ],
+  "summary": {
+    "note_count": 17,
+    "total_duration_beats": 32,
+    "total_duration_seconds": 26.7,
+    "pitch_range": [
+      62,
+      84
+    ],
+    "unique_pitches": 9,
+    "average_velocity": 83.1
+  }
+}
