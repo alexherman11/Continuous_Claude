@@ -107,7 +107,9 @@ def log_api_call(cycle_num, call_num, request_info, response, config):
     except Exception as e:
         logging.error(f"Failed to write API log: {e}")
 
-client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+client = anthropic.Anthropic(
+    timeout=120.0,  # 120s timeout — prevents hung API calls from blocking forever
+)  # reads ANTHROPIC_API_KEY from env
 file_mgr = FileManager(base_path=os.path.dirname(os.path.abspath(__file__)))
 
 MODEL = "claude-opus-4-6"
@@ -1019,6 +1021,9 @@ def run_cycle():
 
     try:
         result = run_cycle_internal(state, user_message)
+    except anthropic.APITimeoutError:
+        logging.error("[Cycle ERROR] Anthropic API call timed out (120s limit)")
+        return jsonify({"error": "Anthropic API timed out. The model may be overloaded — try again."}), 504
     except Exception as e:
         import traceback
         tb = traceback.format_exc()

@@ -52,6 +52,9 @@ export default function ContinuousConsciousness() {
   const [nCyclesRemaining, setNCyclesRemaining] = useState(0);
   const nCyclesRef = useRef(0);
 
+  // Abort controller for in-flight cycle requests
+  const cycleAbortRef = useRef(null);
+
   // Start-stream message state
   const [startMessage, setStartMessage] = useState(null);
 
@@ -153,11 +156,26 @@ export default function ContinuousConsciousness() {
 
   // ── Run a single thought cycle via backend ────────────────────────
 
+  const cancelCycle = useCallback(() => {
+    if (cycleAbortRef.current) {
+      cycleAbortRef.current.abort();
+      cycleAbortRef.current = null;
+    }
+    setIsGenerating(false);
+    setCurrentStream("");
+    setError("Cycle cancelled.");
+  }, []);
+
   const runCycle = useCallback(async (userInterjection) => {
     if (isGenerating) return;
     setIsGenerating(true);
     setCurrentStream("");
     setError(null);
+
+    // Create abort controller with 90-second timeout
+    const controller = new AbortController();
+    cycleAbortRef.current = controller;
+    const timeoutId = setTimeout(() => controller.abort(), 90000);
 
     try {
       const body = {};
@@ -175,6 +193,7 @@ export default function ContinuousConsciousness() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
 
       if (!res.ok) {
@@ -214,9 +233,15 @@ export default function ContinuousConsciousness() {
 
       return true;
     } catch (err) {
-      setError(err.message);
+      if (err.name === "AbortError") {
+        setError("Cycle timed out or was cancelled. The backend may still be processing — try again in a moment.");
+      } else {
+        setError(err.message);
+      }
       return false;
     } finally {
+      clearTimeout(timeoutId);
+      cycleAbortRef.current = null;
       setIsGenerating(false);
       setCurrentStream("");
     }
@@ -486,11 +511,15 @@ export default function ContinuousConsciousness() {
     setImportError(null);
 
     try {
+      const presentController = new AbortController();
+      const presentTimeout = setTimeout(() => presentController.abort(), 90000);
       const res = await fetch("/api/import/present", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ importId, chunkIndex, chunkSize: 4000 }),
+        signal: presentController.signal,
       });
+      clearTimeout(presentTimeout);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || `Present failed: ${res.status}`);
@@ -729,6 +758,16 @@ export default function ContinuousConsciousness() {
                         <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>◐</span>
                         thinking
                       </span>
+                      <span>·</span>
+                      <button
+                        onClick={cancelCycle}
+                        style={{
+                          background: "none", border: "1px solid #ef4444", color: "#ef4444",
+                          borderRadius: 4, padding: "1px 8px", cursor: "pointer", fontSize: 11,
+                        }}
+                      >
+                        cancel
+                      </button>
                     </>
                   )}
                 </div>
