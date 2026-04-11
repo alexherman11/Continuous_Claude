@@ -1776,14 +1776,23 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
                 cmd.extend(["--resume", continue_session])
 
             # Pass environment with engine root as CWD.
-            # Ensure CLAUDE_HOME is set so the CLI finds its config
-            # (on VPS the rootfs is read-only; CLAUDE_HOME points to tmpfs).
+            # Ensure CLAUDE_HOME and HOME point to a writable directory
+            # (on VPS the rootfs is read-only; Claude CLI writes to $HOME/.claude/).
             env = os.environ.copy()
             if "CLAUDE_HOME" not in env:
                 import tempfile
                 claude_home = os.path.join(tempfile.gettempdir(), ".claude-home")
-                os.makedirs(os.path.join(claude_home, ".claude"), exist_ok=True)
-                env["CLAUDE_HOME"] = claude_home
+            else:
+                claude_home = env["CLAUDE_HOME"]
+            os.makedirs(os.path.join(claude_home, ".claude"), exist_ok=True)
+            env["CLAUDE_HOME"] = claude_home
+            # Claude CLI writes to $HOME/.claude/ regardless of CLAUDE_HOME,
+            # so HOME must also point to a writable directory.
+            env["HOME"] = claude_home
+            # Trust the API proxy's self-signed certificate for Node.js
+            proxy_cert = "/usr/local/share/ca-certificates/api-proxy.crt"
+            if os.path.exists(proxy_cert):
+                env["NODE_EXTRA_CA_CERTS"] = proxy_cert
 
         else:
             # Docker mode: exec into container
