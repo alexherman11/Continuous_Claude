@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-VPS_IP="${VPS_IP:-100.101.155.17}"
+VPS_IP="${VPS_IP:?Set VPS_IP to the VPS address (e.g. its Tailscale IP)}"
 VPS_USER="${VPS_USER:-root}"
 
 echo "Deploying watchdog to ${VPS_USER}@${VPS_IP}..."

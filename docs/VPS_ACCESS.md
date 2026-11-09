@@ -6,8 +6,8 @@
 |-------|-------|
 | **Provider** | Hetzner CPX31 |
 | **OS** | Debian 12 |
-| **Hostname** | `debian-4gb-hil-1` |
-| **Tailscale IP** | `100.101.155.17` |
+| **Hostname** | `<vps-hostname>` |
+| **Tailscale IP** | `<VPS_TAILSCALE_IP>` |
 
 ## Prerequisites
 
@@ -17,7 +17,7 @@
 ## Connecting
 
 ```bash
-ssh root@100.101.155.17
+ssh root@<VPS_TAILSCALE_IP>
 ```
 
 No port forwarding, no jump hosts, no VPN client -- Tailscale handles the encrypted tunnel. If Tailscale is connected (`tailscale status` shows the peer), SSH just works.
@@ -27,7 +27,7 @@ No port forwarding, no jump hosts, no VPN client -- Tailscale handles the encryp
 The project has a bare repo on the VPS:
 
 ```bash
-git remote add vps root@100.101.155.17:/srv/git/continuous-claude.git
+git remote add vps root@<VPS_TAILSCALE_IP>:/srv/git/continuous-claude.git
 git push vps main
 ```
 
@@ -46,7 +46,7 @@ From the project root on your local machine:
 Copies source, config, Dockerfile, and host services to the VPS via `scp`. Override defaults with env vars:
 
 ```bash
-VPS_IP=100.101.155.17  # default
+VPS_IP=<VPS_TAILSCALE_IP>  # required
 VPS_USER=root          # default
 ```
 
@@ -89,12 +89,12 @@ DNS uses static `/etc/hosts` entries for `api.anthropic.com` and `statsig.anthro
 
 **Kill switch** (stops Claude container immediately):
 ```bash
-ssh root@100.101.155.17 /usr/local/bin/claude-kill.sh
+ssh root@<VPS_TAILSCALE_IP> /usr/local/bin/claude-kill.sh
 ```
 
 ## Troubleshooting
 
-- **Can't SSH?** Run `tailscale status` -- make sure the VPS peer (`debian-4gb-hil-1`) shows as online.
+- **Can't SSH?** Run `tailscale status` -- make sure the VPS peer (`<vps-hostname>`) shows as online.
 - **Git push rejected?** Pushes to `main` must be GPG-signed. Push to a `claude/*` branch instead, or sign your commit.
 - **Container won't start?** Check `journalctl -u claude-sandbox` or `journalctl -u watchdog-sandbox` for errors.
 - **Watchdog not reporting?** Verify Matrix credentials in `/srv/watchdog/config/notifier.json`.

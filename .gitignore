@@ -9,3 +9,18 @@ Thumbs.db
 sandbox_workspace/
 proposed_changes/applied/
 proposed_changes/rejected/
+
+# Runtime logs and state (generated at runtime; never commit)
+*.log
+api_calls.log
+consciousness_data/runner.log
+consciousness_data/runner_paused.flag
+consciousness_data/matrix_sync_token.txt
+consciousness_data/matrix_bot_config.json
+consciousness_data/budget.json
+consciousness_data/new_core_preview.txt
+consciousness_data/events.jsonl
+
+# Local Claude Code settings
+.claude/settings.local.json
+.claude/launch.json
