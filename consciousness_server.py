@@ -32,6 +32,7 @@ from pdf_importer import (
 from tool_definitions import TOOL_SCHEMAS, execute_tool, MAX_TOOL_CALLS_PER_CYCLE, build_tools_with_search
 from dynamic_tools import load_dynamic_tools, get_dynamic_schemas
 from change_manager import apply_approved_changes
+from event_log import log_event
 
 # ── Setup ─────────────────────────────────────────────────────────────
 
@@ -45,17 +46,23 @@ _base_dir_log = os.path.dirname(os.path.abspath(__file__))
 API_LOG_PATH = os.path.join(_base_dir_log, "api_calls.log")
 
 def log_api_call(cycle_num, call_num, request_info, response, config):
-    """Log detailed API call info to api_calls.log for debugging tool use issues."""
+    """Log detailed API call info to api_calls.log for debugging tool use issues.
+
+    request_info may carry "label" (e.g. "compaction-extraction") and
+    "max_tokens" for calls that aren't regular cycle calls.
+    """
     try:
         with open(API_LOG_PATH, "a", encoding="utf-8") as f:
+            label = request_info.get("label")
             f.write(f"\n{'='*80}\n")
-            f.write(f"CYCLE {cycle_num} | API CALL #{call_num} | {datetime.now().isoformat()}\n")
+            f.write(f"CYCLE {cycle_num} | API CALL #{call_num}"
+                    f"{' | ' + label if label else ''} | {datetime.now().isoformat()}\n")
             f.write(f"{'='*80}\n")
 
             # Request info
             f.write(f"\n── REQUEST ──\n")
             f.write(f"  model: {MODEL}\n")
-            f.write(f"  max_tokens: {config.get('maxTokens', 600)}\n")
+            f.write(f"  max_tokens: {request_info.get('max_tokens', config.get('maxTokens', 600))}\n")
             f.write(f"  temperature: {request_info.get('temperature', config.get('temperature', 0.9))}\n")
             f.write(f"  tool_choice: {request_info.get('tool_choice')}\n")
             f.write(f"  system_prompt_chars: {request_info.get('system_chars', '?')}\n")
@@ -446,6 +453,40 @@ def _default_post_process(raw_insights, compaction_num, compacted_cycles, state)
     return f"{header}\n\n{raw_insights.strip()}"
 
 
+def _usage_fields(response):
+    """Extract token usage from an API response as plain ints (for events)."""
+    usage = getattr(response, "usage", None)
+    return {
+        "input_tokens": getattr(usage, "input_tokens", None),
+        "output_tokens": getattr(usage, "output_tokens", None),
+    }
+
+
+def _compaction_api_call(kind, prompt, max_tokens, state):
+    """
+    Make a compaction-stage API call (kind: "extraction" | "integration")
+    and record it in api_calls.log like regular cycle calls.
+    """
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    log_api_call(
+        state.get("totalCycles", 0), kind,
+        {
+            "label": f"compaction-{kind}",
+            "max_tokens": max_tokens,
+            "num_messages": 1,
+            "messages_chars": len(prompt),
+            "messages_tokens_est": len(prompt) // 4,
+            "num_tools": 0,
+        },
+        response, state.get("config", {}),
+    )
+    return response
+
+
 def run_compaction(state):
     """
     Two-layer compaction with pluggable pipeline.
@@ -470,6 +511,8 @@ def run_compaction(state):
         should, trigger_reason = should_compact_fn(state, segments, config)
     except Exception as e:
         logging.error(f"Compaction plugin should_compact crashed: {e}, falling back to default")
+        log_event("compaction_plugin_fallback", plugin="should_compact",
+                  reason=f"exception: {type(e).__name__}: {e}")
         should, trigger_reason = _default_should_compact(state, segments, config)
 
     if not should:
@@ -483,6 +526,8 @@ def run_compaction(state):
         to_compact, remaining = select_fn(segments, config)
     except Exception as e:
         logging.error(f"Compaction plugin select_segments crashed: {e}, falling back to default")
+        log_event("compaction_plugin_fallback", plugin="select_segments",
+                  reason=f"exception: {type(e).__name__}: {e}")
         to_compact, remaining = _default_select_segments(segments, config)
 
     # Safety: never compact everything
@@ -504,6 +549,8 @@ def run_compaction(state):
         thoughts_text = format_fn(to_compact, state)
     except Exception as e:
         logging.error(f"Compaction plugin format_segments crashed: {e}, falling back to default")
+        log_event("compaction_plugin_fallback", plugin="format_segments",
+                  reason=f"exception: {type(e).__name__}: {e}")
         thoughts_text = _default_format_segments(to_compact, state)
 
     # Build extraction prompt from template (editable via cycle_prompts.json)
@@ -519,12 +566,17 @@ def run_compaction(state):
     )
     extraction_max_tokens = CYCLE_PROMPTS.get("extraction_max_tokens", 1500)
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=extraction_max_tokens,
-        messages=[{"role": "user", "content": extraction_prompt}],
-    )
+    response = _compaction_api_call("extraction", extraction_prompt, extraction_max_tokens, state)
     new_insights = response.content[0].text.strip()
+    log_event(
+        "compaction_extraction",
+        compaction=compaction_num,
+        cycles=f"{compacted_cycles[0]}-{compacted_cycles[-1]}",
+        stop_reason=response.stop_reason,
+        max_tokens=extraction_max_tokens,
+        insights_chars=len(new_insights),
+        **_usage_fields(response),
+    )
 
     # ── Stage 4: Post-process insights (pluggable) ───────────────────
     post_fn = COMPACTION_PLUGINS.get("post_process", _default_post_process)
@@ -532,6 +584,8 @@ def run_compaction(state):
         grouped_block = post_fn(new_insights, compaction_num, compacted_cycles, state)
     except Exception as e:
         logging.error(f"Compaction plugin post_process crashed: {e}, falling back to default")
+        log_event("compaction_plugin_fallback", plugin="post_process",
+                  reason=f"exception: {type(e).__name__}: {e}")
         grouped_block = _default_post_process(new_insights, compaction_num, compacted_cycles, state)
 
     # Append to insights layer
@@ -598,13 +652,20 @@ def run_compaction(state):
         )
         integration_max_tokens = CYCLE_PROMPTS.get("integration_max_tokens", 2000)
 
-        integration_response = client.messages.create(
-            model=MODEL,
-            max_tokens=integration_max_tokens,
-            messages=[{"role": "user", "content": integration_prompt}],
-        )
+        integration_response = _compaction_api_call(
+            "integration", integration_prompt, integration_max_tokens, state)
 
         new_core = integration_response.content[0].text.strip()
+        log_event(
+            "compaction_integration",
+            compaction=compaction_num,
+            cycles=f"{compacted_cycles[0]}-{compacted_cycles[-1]}",
+            stop_reason=integration_response.stop_reason,
+            max_tokens=integration_max_tokens,
+            core_chars_before=len(current_core),
+            core_chars_after=len(new_core),
+            **_usage_fields(integration_response),
+        )
         state["memoryCore"] = new_core
         state["insights"] = remaining_insights
 
@@ -923,6 +984,9 @@ def run_cycle_internal(state, user_message=None, on_text=None, on_tool=None):
                     "error": f"Tool execution failed: {type(e).__name__}: {e}",
                     "tool_name": block.name,
                 }
+            if isinstance(result, dict) and "error" in result:
+                log_event("tool_error", cycle=cycle_num, tool=block.name,
+                          error=str(result.get("error"))[:500])
             if on_tool:
                 preview = json.dumps(result)[:200] if result else ""
                 on_tool("tool_done", {"tool": block.name, "id": block.id, "result_preview": preview})
