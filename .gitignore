@@ -24,3 +24,6 @@ consciousness_data/events.jsonl
 # Local Claude Code settings
 .claude/settings.local.json
 .claude/launch.json
+
+# Test artifacts
+.pytest_cache/
