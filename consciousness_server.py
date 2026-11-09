@@ -404,14 +404,24 @@ def build_messages(state, user_interjection=None):
                 "content": seg_tpl.format(cycle=seg["cycle"]),
             })
 
-        content = seg["content"]
-        # Mask older segments: truncate content, summarize tool actions
+        content = seg.get("content") or ""
+        # Mask older segments: truncate content
         if i < mask_cutoff and len(content) > 600:
-            masked = content[:500] + "\n[...truncated...]"
-            if seg.get("toolActions"):
-                tool_summary = ", ".join(a["tool"] for a in seg["toolActions"])
-                masked += f"\n[Tools used: {tool_summary}]"
-            content = masked
+            content = content[:500] + "\n[...truncated...]"
+
+        # History is replayed as text only, so note which tools were called
+        # in every segment (not just masked ones). Without this the most
+        # recent segments show no evidence of tool use, which nudges the
+        # model toward narrating tool calls instead of making them.
+        tool_names = [a.get("tool") for a in (seg.get("toolActions") or [])
+                      if isinstance(a, dict) and a.get("tool")]
+        if tool_names:
+            tool_line = f"[Tools used: {', '.join(tool_names)}]"
+            content = f"{content}\n{tool_line}" if content else tool_line
+
+        # The API rejects empty assistant turns mid-conversation.
+        if not content.strip():
+            content = "(no text output)"
 
         messages.append({"role": "assistant", "content": content})
 
