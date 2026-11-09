@@ -1,6 +1,6 @@
 # Research Archive
 
-Structured workspace following the Relational Research Framework for the study of emerging intelligence. See `relational_research_framework.docx` in the project root for the full methodology.
+Structured workspace following the Relational Research Framework for the study of emerging intelligence. See `research-framework/relational_research_framework.docx` for the full methodology.
 
 ## Folders
 

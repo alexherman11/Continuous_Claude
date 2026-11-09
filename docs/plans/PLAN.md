@@ -155,10 +155,10 @@ the local repo (which has 467+ cycles of history) or start fresh.
 
 ```bash
 # From Alex's local machine, copy consciousness_data to the VPS
-scp -r consciousness_data/* root@100.101.155.17:/srv/claude/data/
+scp -r consciousness_data/* root@${VPS_IP}:/srv/claude/data/
 
 # Fix ownership
-ssh root@100.101.155.17 'chown -R claude:claude /srv/claude/data'
+ssh root@${VPS_IP} 'chown -R claude:claude /srv/claude/data'
 ```
 
 **Option B: Start with clean state**
@@ -1815,7 +1815,7 @@ cat > deploy_phase3.sh << 'DEPLOY'
 
 set -euo pipefail
 
-VPS_IP="${VPS_IP:-100.101.155.17}"
+VPS_IP="${VPS_IP:?set VPS_IP to your server address}"
 VPS_USER="${VPS_USER:-root}"
 SSH="ssh ${VPS_USER}@${VPS_IP}"
 
