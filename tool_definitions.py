@@ -29,6 +29,7 @@ import time
 
 from dynamic_tools import load_dynamic_tools, get_dynamic_schemas, execute_dynamic_tool, list_dynamic_tools, disable_tool as disable_dynamic_tool
 from change_manager import propose_change, list_changes, rollback_change, apply_approved_changes
+from path_safety import is_within
 
 # ── Working memory constants ─────────────────────────────────────────
 
@@ -1738,19 +1739,26 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         # Determine working directory for Claude Code
         engine_dir = os.path.dirname(os.path.abspath(__file__))
         if _is_vps_mode():
-            # VPS mode: run Claude CLI from the engine root so it can see
-            # all engine files. Output files for propose_code_change should
-            # be written to sandbox_workspace/.
-            workspace_dir = engine_dir
+            # VPS mode: run Claude CLI with cwd = sandbox_workspace/. It can
+            # still read engine files at ../ , but its output lands in
+            # sandbox_workspace/ where propose_code_change picks it up.
+            # Running it from the engine root let it edit Tier 2/3 files
+            # directly (the engine dir is mounted read-write), bypassing the
+            # change tiers. Edits to engine files are additionally denied via
+            # Claude Code permission rules written by deploy/scripts/entrypoint.sh.
+            # NOTE: this is policy, not enforcement -- Bash can still write
+            # anywhere the container user can. See SECURITY.md.
             sandbox_out = os.path.join(engine_dir, "sandbox_workspace")
             os.makedirs(sandbox_out, exist_ok=True)
+            workspace_dir = sandbox_out
 
             # System-level context so Claude Code knows the output convention
             vps_system_context = (
-                "You are working inside the Continuous Claude engine directory. "
-                "You can read any file here to understand the codebase. "
-                "When you create or modify files that should be deployed, "
-                "write them to the sandbox_workspace/ subdirectory. "
+                "Your working directory is sandbox_workspace/ inside the "
+                "Continuous Claude engine directory; the engine code is in the "
+                "parent directory (../) and you can read it to understand the codebase. "
+                "Do not modify engine files directly. "
+                "Write files that should be deployed here, in sandbox_workspace/. "
                 "Files in sandbox_workspace/ will be picked up by propose_code_change "
                 "for validation and deployment through the tier system. "
                 "Key engine files: consciousness_server.py (cycle runner), "
@@ -1939,9 +1947,7 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         full_path = os.path.join(engine_dir, target_file)
 
         # Verify resolved path is still within engine_dir (prevents symlink escape)
-        real_path = os.path.realpath(full_path)
-        real_engine = os.path.realpath(engine_dir)
-        if not real_path.startswith(real_engine + os.sep) and real_path != real_engine:
+        if not is_within(engine_dir, full_path):
             return {"error": "File is outside the engine directory.",
                     "recovery_hint": "Only files within the engine directory are accessible."}
 
@@ -2209,6 +2215,10 @@ def _execute_tool_inner(name, tool_input, file_mgr, state):
         source_path = None
         for dir_name, dir_path in search_dirs:
             candidate = os.path.join(dir_path, source_file)
+            # Source must live inside the searched directory (no ../ or
+            # absolute paths -- otherwise this reads arbitrary files).
+            if not is_within(dir_path, candidate):
+                continue
             if os.path.exists(candidate):
                 source_path = candidate
                 break

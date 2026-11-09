@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-VPS_IP="${VPS_IP:-100.101.155.17}"
+VPS_IP="${VPS_IP:?Set VPS_IP to the VPS address (e.g. its Tailscale IP)}"
 VPS_USER="${VPS_USER:-root}"
 
 echo "Deploying watchdog to ${VPS_USER}@${VPS_IP}..."
@@ -62,7 +62,7 @@ echo ""
 echo "Deployment complete. Next steps:"
 echo "  1. Build the watchdog container image:"
 echo "     ssh ${VPS_USER}@${VPS_IP} 'cd /srv/watchdog && podman build -t watchdog-img .'"
-echo "  2. Start the watchdog container (see PLAN.md Step 14.2)"
+echo "  2. Start the watchdog container (see docs/plans/PLAN.md Step 14.2)"
 echo "  3. Enable host services:"
 echo "     ssh ${VPS_USER}@${VPS_IP} 'systemctl enable --now watchdog-notifier watchdog-stopper'"
 echo "  4. Configure notifier Matrix credentials:"

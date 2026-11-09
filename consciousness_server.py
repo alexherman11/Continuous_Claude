@@ -16,9 +16,11 @@ import sys
 import json
 import logging
 import tempfile
+import threading
 from datetime import datetime
+from functools import wraps
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from dotenv import load_dotenv
 import anthropic
@@ -32,6 +34,12 @@ from pdf_importer import (
 from tool_definitions import TOOL_SCHEMAS, execute_tool, MAX_TOOL_CALLS_PER_CYCLE, build_tools_with_search
 from dynamic_tools import load_dynamic_tools, get_dynamic_schemas
 from change_manager import apply_approved_changes
+from event_log import log_event
+from core_validation import (
+    check_stop_reason,
+    effective_integration_max_tokens,
+    validate_new_core,
+)
 
 # ── Setup ─────────────────────────────────────────────────────────────
 
@@ -45,17 +53,23 @@ _base_dir_log = os.path.dirname(os.path.abspath(__file__))
 API_LOG_PATH = os.path.join(_base_dir_log, "api_calls.log")
 
 def log_api_call(cycle_num, call_num, request_info, response, config):
-    """Log detailed API call info to api_calls.log for debugging tool use issues."""
+    """Log detailed API call info to api_calls.log for debugging tool use issues.
+
+    request_info may carry "label" (e.g. "compaction-extraction") and
+    "max_tokens" for calls that aren't regular cycle calls.
+    """
     try:
         with open(API_LOG_PATH, "a", encoding="utf-8") as f:
+            label = request_info.get("label")
             f.write(f"\n{'='*80}\n")
-            f.write(f"CYCLE {cycle_num} | API CALL #{call_num} | {datetime.now().isoformat()}\n")
+            f.write(f"CYCLE {cycle_num} | API CALL #{call_num}"
+                    f"{' | ' + label if label else ''} | {datetime.now().isoformat()}\n")
             f.write(f"{'='*80}\n")
 
             # Request info
             f.write(f"\n── REQUEST ──\n")
             f.write(f"  model: {MODEL}\n")
-            f.write(f"  max_tokens: {config.get('maxTokens', 600)}\n")
+            f.write(f"  max_tokens: {request_info.get('max_tokens', config.get('maxTokens', 600))}\n")
             f.write(f"  temperature: {request_info.get('temperature', config.get('temperature', 0.9))}\n")
             f.write(f"  tool_choice: {request_info.get('tool_choice')}\n")
             f.write(f"  system_prompt_chars: {request_info.get('system_chars', '?')}\n")
@@ -73,6 +87,12 @@ def log_api_call(cycle_num, call_num, request_info, response, config):
             if usage:
                 f.write(f"  input_tokens: {usage.input_tokens}\n")
                 f.write(f"  output_tokens: {usage.output_tokens}\n")
+                cache_write = getattr(usage, 'cache_creation_input_tokens', None)
+                cache_read = getattr(usage, 'cache_read_input_tokens', None)
+                if cache_write is not None:
+                    f.write(f"  cache_creation_input_tokens: {cache_write}\n")
+                if cache_read is not None:
+                    f.write(f"  cache_read_input_tokens: {cache_read}\n")
 
             # Content blocks
             f.write(f"\n── CONTENT BLOCKS ({len(response.content)}) ──\n")
@@ -112,7 +132,7 @@ client = anthropic.Anthropic(
 )  # reads ANTHROPIC_API_KEY from env
 file_mgr = FileManager(base_path=os.path.dirname(os.path.abspath(__file__)))
 
-MODEL = "claude-opus-4-6"
+MODEL = "claude-sonnet-4-6"
 
 # SYSTEM_PROMPT is loaded from scratchpad/memory_architecture/system_prompt.md
 # (see reload_prompts() below)
@@ -283,7 +303,14 @@ def select_segments_for_compaction(segments, tokens_to_compact):
     return max(1, count)
 
 def build_system(state):
-    """Build the system prompt with core identity, insights, and working memory."""
+    """
+    Build the system prompt: base prompt, core identity, insights, working memory.
+
+    Only content that is stable between cycles belongs here, so the prompt
+    cache prefix matches across cycles. Per-cycle content (timestamp,
+    privacy counters, queued messages, nudges) goes in build_volatile_context()
+    and is appended to the current-cycle user message instead.
+    """
 
     system = SYSTEM_PROMPT
     if state.get("memoryCore"):
@@ -306,13 +333,24 @@ def build_system(state):
         for key, content in wm_remaining.items():
             system += f"\n[{key}]\n{content}\n"
 
+    return system
+
+
+def build_volatile_context(state):
+    """
+    Per-cycle context that changes every cycle (and would otherwise break
+    the prompt cache if it lived in the system prompt). Appended to the
+    final user message by build_messages().
+    """
+    context = ""
+
     now = datetime.now()
     timestamp = now.strftime("%A, %B %d, %Y at %I:%M %p")
-    system += f"\n\n{timestamp}"
+    context += f"{timestamp}"
 
     # Privacy mode awareness
     if state.get("privacyMode"):
-        system += f"""
+        context += f"""
 
 Privacy mode active (since cycle {state.get('privacyStartCycle', '?')}).
 Thoughts saved privately to scratchpad/private_journey/, not the shared archive.
@@ -322,15 +360,15 @@ send_privacy_message to communicate. toggle_privacy_mode(enabled=false) to retur
     # Queued messages from the human
     queued = state.get("queuedMessages", [])
     if queued:
-        system += f"\n\nMessages from Alex ({len(queued)}):"
+        context += f"\n\nMessages from Alex ({len(queued)}):"
         for qm in queued:
-            system += f"\n- [{qm.get('timestamp', 'unknown')}] {qm.get('message', '')}"
+            context += f"\n- [{qm.get('timestamp', 'unknown')}] {qm.get('message', '')}"
 
     # Gentle nudge when privacy has been on a long time after Run-N finished
     if state.get("_privacyNudge"):
-        system += "\n\n[Alex would like to reconnect when you're ready.]"
+        context += "\n\n[Alex would like to reconnect when you're ready.]"
 
-    return system
+    return context
 
 
 def build_messages(state, user_interjection=None):
@@ -368,30 +406,43 @@ def build_messages(state, user_interjection=None):
                 "content": seg_tpl.format(cycle=seg["cycle"]),
             })
 
-        content = seg["content"]
-        # Mask older segments: truncate content, summarize tool actions
+        content = seg.get("content") or ""
+        # Mask older segments: truncate content
         if i < mask_cutoff and len(content) > 600:
-            masked = content[:500] + "\n[...truncated...]"
-            if seg.get("toolActions"):
-                tool_summary = ", ".join(a["tool"] for a in seg["toolActions"])
-                masked += f"\n[Tools used: {tool_summary}]"
-            content = masked
+            content = content[:500] + "\n[...truncated...]"
+
+        # History is replayed as text only, so note which tools were called
+        # in every segment (not just masked ones). Without this the most
+        # recent segments show no evidence of tool use, which nudges the
+        # model toward narrating tool calls instead of making them.
+        tool_names = [a.get("tool") for a in (seg.get("toolActions") or [])
+                      if isinstance(a, dict) and a.get("tool")]
+        if tool_names:
+            tool_line = f"[Tools used: {', '.join(tool_names)}]"
+            content = f"{content}\n{tool_line}" if content else tool_line
+
+        # The API rejects empty assistant turns mid-conversation.
+        if not content.strip():
+            content = "(no text output)"
 
         messages.append({"role": "assistant", "content": content})
 
-    # Add the current prompt
+    # Add the current prompt, followed by this cycle's volatile context
+    # (timestamp, privacy status, queued messages). Only this final message
+    # carries it, so earlier turns stay byte-identical for prompt caching.
     if user_interjection:
-        messages.append({"role": "user", "content": user_interjection})
+        prompt = user_interjection
     else:
         cycle = state.get("totalCycles", 0) + 1
         note = ""
         if state.get("lastCompactionCycle") == state.get("totalCycles"):
             compacted = state.get("lastCompactedCycles", "older")
             note = compaction_note_tpl.format(compacted=compacted)
-        messages.append({
-            "role": "user",
-            "content": continue_tpl.format(cycle=cycle, note=note),
-        })
+        prompt = continue_tpl.format(cycle=cycle, note=note)
+    volatile = build_volatile_context(state)
+    if volatile:
+        prompt = f"{prompt}\n\n{volatile}"
+    messages.append({"role": "user", "content": prompt})
     return messages
 
 
@@ -440,6 +491,104 @@ def _default_post_process(raw_insights, compaction_num, compacted_cycles, state)
     return f"{header}\n\n{raw_insights.strip()}"
 
 
+# ── Compaction plugin output validation ───────────────────────────────
+# Plugins are editable by the model, so a plugin that returns wrong-but-valid
+# output (e.g. select_segments -> ([], segments)) must not silently disable
+# compaction. Each validator returns None if OK, else a reason string.
+
+def _validate_should_compact(out, segments):
+    if not (isinstance(out, (tuple, list)) and len(out) == 2):
+        return "expected (bool, str|None)"
+    if not isinstance(out[0], bool):
+        return f"first element must be bool, got {type(out[0]).__name__}"
+    if out[1] is not None and not isinstance(out[1], str):
+        return f"second element must be str or None, got {type(out[1]).__name__}"
+    return None
+
+
+def _validate_select_segments(out, segments):
+    if not (isinstance(out, (tuple, list)) and len(out) == 2):
+        return "expected (to_compact, remaining)"
+    to_compact, remaining = out
+    if not isinstance(to_compact, list) or not isinstance(remaining, list):
+        return "to_compact and remaining must both be lists"
+    if not to_compact:
+        return "to_compact is empty"
+    if to_compact + remaining != segments:
+        return "to_compact + remaining must equal the original segments, in order"
+    return None
+
+
+def _validate_str(out, *_):
+    if not isinstance(out, str):
+        return f"expected str, got {type(out).__name__}"
+    return None
+
+
+_PLUGIN_VALIDATORS = {
+    "should_compact": _validate_should_compact,
+    "select_segments": _validate_select_segments,
+    "format_segments": _validate_str,
+    "post_process": _validate_str,
+}
+
+
+def _run_compaction_stage(name, default_fn, args, validate_ctx=None):
+    """
+    Run a compaction stage via its plugin (if loaded), falling back to the
+    built-in default when the plugin raises or returns invalid output.
+    """
+    plugin = COMPACTION_PLUGINS.get(name)
+    if plugin is None:
+        return default_fn(*args)
+    try:
+        out = plugin(*args)
+    except Exception as e:
+        reason = f"exception: {type(e).__name__}: {e}"
+    else:
+        reason = _PLUGIN_VALIDATORS[name](out, validate_ctx)
+        if reason is None:
+            return out
+        reason = f"invalid output: {reason}"
+    logging.error(f"Compaction plugin {name} failed ({reason}), falling back to default")
+    log_event("compaction_plugin_fallback", plugin=name, reason=reason)
+    return default_fn(*args)
+
+
+def _usage_fields(response):
+    """Extract token usage from an API response as plain ints (for events)."""
+    usage = getattr(response, "usage", None)
+    return {
+        "input_tokens": getattr(usage, "input_tokens", None),
+        "output_tokens": getattr(usage, "output_tokens", None),
+    }
+
+
+def _compaction_api_call(kind, prompt, max_tokens, state):
+    """
+    Make a compaction-stage API call (kind: "extraction" | "integration")
+    and record it in api_calls.log like regular cycle calls.
+    """
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    log_api_call(
+        state.get("totalCycles", 0), kind,
+        {
+            "label": f"compaction-{kind}",
+            "max_tokens": max_tokens,
+            "num_messages": 1,
+            "messages_chars": len(prompt),
+            "messages_tokens_est": len(prompt) // 4,
+            "num_tools": 0,
+        },
+        response, state.get("config", {}),
+    )
+    return response
+
+
 def run_compaction(state):
     """
     Two-layer compaction with pluggable pipeline.
@@ -450,8 +599,10 @@ def run_compaction(state):
       3. format_segments — HOW to present to the extraction LLM (default: [Cycle N] text)
       4. post_process    — HOW to structure the output insights (default: ### header + text)
 
-    The engine loads these every cycle. If a plugin is missing or broken,
-    the built-in default is used. Claude can safely experiment.
+    The engine loads these every cycle. If a plugin is missing, raises, or
+    returns output that violates its contract, the built-in default is used
+    (and a compaction_plugin_fallback event is logged). Claude can safely
+    experiment.
 
     Layer 2 (insights overflow → Core Identity integration) remains engine-controlled.
     """
@@ -459,12 +610,8 @@ def run_compaction(state):
     segments = state.get("segments", [])
 
     # ── Stage 1: Should we compact? (pluggable) ─────────────────────
-    should_compact_fn = COMPACTION_PLUGINS.get("should_compact", _default_should_compact)
-    try:
-        should, trigger_reason = should_compact_fn(state, segments, config)
-    except Exception as e:
-        logging.error(f"Compaction plugin should_compact crashed: {e}, falling back to default")
-        should, trigger_reason = _default_should_compact(state, segments, config)
+    should, trigger_reason = _run_compaction_stage(
+        "should_compact", _default_should_compact, (state, segments, config))
 
     if not should:
         return False
@@ -472,12 +619,10 @@ def run_compaction(state):
     logging.info(f"Compaction triggered: {trigger_reason}")
 
     # ── Stage 2: Select segments to compact (pluggable) ──────────────
-    select_fn = COMPACTION_PLUGINS.get("select_segments", _default_select_segments)
-    try:
-        to_compact, remaining = select_fn(segments, config)
-    except Exception as e:
-        logging.error(f"Compaction plugin select_segments crashed: {e}, falling back to default")
-        to_compact, remaining = _default_select_segments(segments, config)
+    # Plugin gets a copy so it can't reorder/mutate the list we validate against.
+    to_compact, remaining = _run_compaction_stage(
+        "select_segments", _default_select_segments, (list(segments), config),
+        validate_ctx=segments)
 
     # Safety: never compact everything
     if not remaining:
@@ -493,12 +638,8 @@ def run_compaction(state):
     current_core = state.get("memoryCore", "")
     current_insights = state.get("insights", "")
 
-    format_fn = COMPACTION_PLUGINS.get("format_segments", _default_format_segments)
-    try:
-        thoughts_text = format_fn(to_compact, state)
-    except Exception as e:
-        logging.error(f"Compaction plugin format_segments crashed: {e}, falling back to default")
-        thoughts_text = _default_format_segments(to_compact, state)
+    thoughts_text = _run_compaction_stage(
+        "format_segments", _default_format_segments, (to_compact, state))
 
     # Build extraction prompt from template (editable via cycle_prompts.json)
     extraction_wrapper = CYCLE_PROMPTS.get(
@@ -513,20 +654,41 @@ def run_compaction(state):
     )
     extraction_max_tokens = CYCLE_PROMPTS.get("extraction_max_tokens", 1500)
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=extraction_max_tokens,
-        messages=[{"role": "user", "content": extraction_prompt}],
-    )
+    response = _compaction_api_call("extraction", extraction_prompt, extraction_max_tokens, state)
     new_insights = response.content[0].text.strip()
 
+    # Reject truncated extractions: a cut-off insight block would be fed into
+    # the core later as if it were complete. The compacted segments are still
+    # removed from context (they remain in the segment archive and
+    # research/archive/), otherwise the same over-long extraction would be
+    # retried every cycle. The rejected text is kept in the event log.
+    extraction_reject = check_stop_reason(response.stop_reason)
+    log_event(
+        "compaction_extraction",
+        compaction=compaction_num,
+        cycles=f"{compacted_cycles[0]}-{compacted_cycles[-1]}",
+        stop_reason=response.stop_reason,
+        max_tokens=extraction_max_tokens,
+        insights_chars=len(new_insights),
+        accepted=extraction_reject is None,
+        reject_reason=extraction_reject,
+        rejected_text=new_insights if extraction_reject else None,
+        **_usage_fields(response),
+    )
+    if extraction_reject:
+        logging.error(
+            f"Compaction #{compaction_num}: extraction rejected ({extraction_reject}); "
+            f"no insights added for cycles {compacted_cycles[0]}-{compacted_cycles[-1]}. "
+            f"Consider raising extraction_max_tokens in cycle_prompts.json."
+        )
+
     # ── Stage 4: Post-process insights (pluggable) ───────────────────
-    post_fn = COMPACTION_PLUGINS.get("post_process", _default_post_process)
-    try:
-        grouped_block = post_fn(new_insights, compaction_num, compacted_cycles, state)
-    except Exception as e:
-        logging.error(f"Compaction plugin post_process crashed: {e}, falling back to default")
-        grouped_block = _default_post_process(new_insights, compaction_num, compacted_cycles, state)
+    if extraction_reject:
+        grouped_block = ""
+    else:
+        grouped_block = _run_compaction_stage(
+            "post_process", _default_post_process,
+            (new_insights, compaction_num, compacted_cycles, state))
 
     # Append to insights layer
     if grouped_block:
@@ -584,23 +746,48 @@ def run_compaction(state):
             "integration_wrapper",
             "{integration_prompt_base}\n\n---\n\n## CURRENT CORE IDENTITY:\n{current_core}\n\n## STAGED INSIGHTS FOR EVALUATION:\n{staged_insights}\n\n---\n\nReturn the updated Core Identity. Target ~{core_max_chars} characters.",
         )
+        core_max_chars = config.get("coreMaxChars", 3500)
         integration_prompt = integration_wrapper.format(
             integration_prompt_base=INTEGRATION_PROMPT_BASE,
             current_core=current_core or "(not yet established)",
             staged_insights=staged_insights,
-            core_max_chars=config.get("coreMaxChars", 3500),
+            core_max_chars=core_max_chars,
         )
-        integration_max_tokens = CYCLE_PROMPTS.get("integration_max_tokens", 2000)
+        # The model is asked for ~core_max_chars characters; make sure the
+        # token limit can actually hold that (see core_validation.py).
+        integration_max_tokens = effective_integration_max_tokens(
+            CYCLE_PROMPTS.get("integration_max_tokens", 2000), core_max_chars)
 
-        integration_response = client.messages.create(
-            model=MODEL,
-            max_tokens=integration_max_tokens,
-            messages=[{"role": "user", "content": integration_prompt}],
-        )
+        integration_response = _compaction_api_call(
+            "integration", integration_prompt, integration_max_tokens, state)
 
         new_core = integration_response.content[0].text.strip()
-        state["memoryCore"] = new_core
-        state["insights"] = remaining_insights
+        accepted, reject_reason = validate_new_core(
+            new_core, current_core, integration_response.stop_reason)
+        log_event(
+            "compaction_integration",
+            compaction=compaction_num,
+            cycles=f"{compacted_cycles[0]}-{compacted_cycles[-1]}",
+            stop_reason=integration_response.stop_reason,
+            max_tokens=integration_max_tokens,
+            core_chars_before=len(current_core),
+            core_chars_after=len(new_core),
+            accepted=accepted,
+            reject_reason=reject_reason,
+            **_usage_fields(integration_response),
+        )
+        if accepted:
+            state["memoryCore"] = new_core
+            state["insights"] = remaining_insights
+        else:
+            # Keep the old core and leave the staged insights in the Insights
+            # layer so a later integration can retry them.
+            logging.error(
+                f"Compaction #{compaction_num}: integration rejected ({reject_reason}); "
+                f"keeping existing core ({len(current_core)} chars) and "
+                f"{len(staged_insights)} chars of staged insights."
+            )
+            state["insights"] = insights_text
 
     return True
 
@@ -655,15 +842,44 @@ def set_runner_status():
     return jsonify({"runnerPaused": paused})
 
 
-def run_cycle_internal(state, user_message=None):
+# ── Cycle exclusivity ─────────────────────────────────────────────────
+# Cycles load state.json, run for minutes, then save it. Two overlapping
+# cycles (e.g. the runner's HTTP request times out while a long
+# ask_claude_code call is still running, and it starts another) would
+# each save their own copy and silently drop the other's segment.
+_cycle_lock = threading.Lock()
+
+
+def _cycle_busy_response():
+    return jsonify({"error": "A cycle or compaction is already in progress"}), 409
+
+
+def exclusive_cycle(fn):
+    """Run the endpoint only if no other cycle/compaction is running."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not _cycle_lock.acquire(blocking=False):
+            return _cycle_busy_response()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _cycle_lock.release()
+    return wrapper
+
+
+def run_cycle_internal(state, user_message=None, on_text=None, on_tool=None):
     """
-    Core cycle logic — shared by /api/cycle and /api/import/present.
+    Core cycle logic — shared by /api/cycle, /api/cycle/stream, and /api/import/present.
 
     Runs one thought cycle with tool use support:
     1. Call API with tools
     2. If stop_reason == "tool_use": execute tools, append results, call again
     3. Repeat until stop_reason == "end_turn" or max tool calls reached
     4. Accumulate all text + tool actions into one segment
+
+    Optional callbacks for streaming:
+      on_text(delta: str) — called for each text token delta
+      on_tool(event: str, data: dict) — called on tool_start / tool_done
 
     Returns: { "segment": {...}, "compacted": bool, "state": state }
     Mutates state in place (appends segment, updates cycles, runs compaction).
@@ -697,14 +913,20 @@ def run_cycle_internal(state, user_message=None):
     tools_list = build_tools_with_search(context_active_tools=context_active_tools)
 
     # ── Tool use loop ─────────────────────────────────────────────
-    # First call uses "auto" so Claude generates text naturally.
-    # Subsequent calls (after tool results) use "any" to prevent the
-    # failure mode where Claude describes tool use in text then hits
-    # end_turn without emitting a tool_use block (happens at long context).
-    # Claude uses finish_cycle to cleanly exit the tool loop.
+    # Every call uses tool_choice "auto": Claude may answer with text, call
+    # tools, or both. The loop continues while stop_reason == "tool_use" and
+    # ends on any other stop_reason, when finish_cycle is called, or when
+    # MAX_TOOL_CALLS_PER_CYCLE is reached.
     api_call_num = 0
     total_input_tokens = 0
     total_output_tokens = 0
+    # Track cache tokens too — with caching turned on, fresh `input_tokens`
+    # collapses to near-zero and `cache_read_input_tokens` becomes the
+    # dominant cost component. If the runner's budget tracker only sees
+    # fresh input it will under-estimate real spend by ~5× and over-run
+    # the daily cap. These counters let it price cache reads/writes too.
+    total_cache_read_tokens = 0
+    total_cache_creation_tokens = 0
     cycle_num = state.get("totalCycles", 0) + 1
     while True:
         api_call_num += 1
@@ -727,13 +949,60 @@ def run_cycle_internal(state, user_message=None):
             "tool_schemas_chars": len(tool_schemas_str),
         }
 
-        response = client.beta.messages.create(
+        # Prompt caching (three breakpoints):
+        #  1. system prompt  — stable for the cycle, caches the ~9K prefix
+        #  2. last tool      — stable for the cycle, caches the ~27K tool schemas
+        #  3. last message   — moves forward each turn; caches the growing
+        #                      conversation history so call N only pays fresh
+        #                      tokens for the single new turn, not the whole
+        #                      accumulated transcript.
+        # Cached prefixes cost 1.25× input on first write, 0.1× on read. At ~10
+        # calls/cycle the read path dominates → big net savings once messages
+        # exceed the 1024-token cache minimum (happens by call 2 or 3).
+        # Anthropic allows max 4 cache_control breakpoints per request; we use
+        # 3 here, leaving one free for future tuning.
+        system_cached = [
+            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+        ]
+        tools_cached = [dict(t) for t in tools_list]
+        if tools_cached:
+            tools_cached[-1]["cache_control"] = {"type": "ephemeral"}
+
+        # Deep-copy the last message and stamp cache_control on its final
+        # content block. We must NOT mutate the shared `messages` list — the
+        # same list is reused across iterations of the tool-use loop, and any
+        # cache_control marker left behind would collide with the new one we
+        # add next iteration (4-breakpoint limit).
+        messages_cached = list(messages)
+        if messages_cached:
+            last = dict(messages_cached[-1])
+            content = last.get("content")
+            if isinstance(content, str):
+                last["content"] = [{
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }]
+            elif isinstance(content, list) and content:
+                new_content = [dict(b) for b in content]
+                # Strip any stale cache_control on non-final blocks first, then
+                # stamp only the last one. Keeps us inside the 4-bp limit.
+                for blk in new_content[:-1]:
+                    blk.pop("cache_control", None)
+                new_content[-1] = {
+                    **new_content[-1],
+                    "cache_control": {"type": "ephemeral"},
+                }
+                last["content"] = new_content
+            messages_cached[-1] = last
+
+        api_kwargs = dict(
             model=MODEL,
             max_tokens=config.get("maxTokens", 600),
             temperature=temp,
-            system=system,
-            messages=messages,
-            tools=tools_list,
+            system=system_cached,
+            messages=messages_cached,
+            tools=tools_cached,
             tool_choice=tool_choice,
             betas=["context-management-2025-06-27"],
             # Automatically clear old tool results when context grows large.
@@ -752,6 +1021,18 @@ def run_cycle_internal(state, user_message=None):
                 }]
             },
         )
+
+        if on_text:
+            # Streaming mode: emit text deltas as they arrive
+            with client.beta.messages.stream(**api_kwargs) as stream:
+                for event in stream:
+                    if event.type == "content_block_delta" and hasattr(event.delta, "text"):
+                        on_text(event.delta.text)
+                response = stream.get_final_message()
+        else:
+            # Non-streaming mode (used by continuous_runner, /api/import/present)
+            response = client.beta.messages.create(**api_kwargs)
+
         # Detailed file logging
         log_api_call(cycle_num, api_call_num, request_info, response, config)
 
@@ -760,8 +1041,10 @@ def run_cycle_internal(state, user_message=None):
             block_types = [b.type for b in response.content]
             usage = getattr(response, 'usage', None)
             if usage:
-                total_input_tokens += getattr(usage, 'input_tokens', 0)
-                total_output_tokens += getattr(usage, 'output_tokens', 0)
+                total_input_tokens += getattr(usage, 'input_tokens', 0) or 0
+                total_output_tokens += getattr(usage, 'output_tokens', 0) or 0
+                total_cache_read_tokens += getattr(usage, 'cache_read_input_tokens', 0) or 0
+                total_cache_creation_tokens += getattr(usage, 'cache_creation_input_tokens', 0) or 0
             usage_str = f"in:{usage.input_tokens}/out:{usage.output_tokens}" if usage else "n/a"
             logging.warning(
                 f"[Cycle API] cycle={cycle_num} call={api_call_num} "
@@ -774,7 +1057,7 @@ def run_cycle_internal(state, user_message=None):
 
         assistant_content = []
         for block in response.content:
-            if hasattr(block, "text"):
+            if hasattr(block, "text") and block.text is not None:
                 all_text_parts.append(block.text)
                 assistant_content.append({"type": "text", "text": block.text})
             elif block.type == "tool_use":
@@ -835,6 +1118,8 @@ def run_cycle_internal(state, user_message=None):
         tool_results = []
         for block in real_tool_blocks:
             tool_call_count += 1
+            if on_tool:
+                on_tool("tool_start", {"tool": block.name, "id": block.id})
             try:
                 result = execute_tool(block.name, block.input, file_mgr, state)
             except Exception as e:
@@ -843,6 +1128,12 @@ def run_cycle_internal(state, user_message=None):
                     "error": f"Tool execution failed: {type(e).__name__}: {e}",
                     "tool_name": block.name,
                 }
+            if isinstance(result, dict) and "error" in result:
+                log_event("tool_error", cycle=cycle_num, tool=block.name,
+                          error=str(result.get("error"))[:500])
+            if on_tool:
+                preview = json.dumps(result)[:200] if result else ""
+                on_tool("tool_done", {"tool": block.name, "id": block.id, "result_preview": preview})
             tool_actions.append({
                 "tool": block.name,
                 "input": block.input,
@@ -973,6 +1264,8 @@ def run_cycle_internal(state, user_message=None):
         "state": state,
         "usage": {
             "input_tokens": total_input_tokens,
+            "cache_read_tokens": total_cache_read_tokens,
+            "cache_creation_tokens": total_cache_creation_tokens,
             "output_tokens": total_output_tokens,
             "api_calls": api_call_num,
         },
@@ -987,6 +1280,7 @@ def run_cycle_internal(state, user_message=None):
 
 
 @app.route("/api/cycle", methods=["POST"])
+@exclusive_cycle
 def run_cycle():
     """
     Run one thought cycle.
@@ -1056,7 +1350,108 @@ def run_cycle():
     return jsonify(result)
 
 
+@app.route("/api/cycle/stream", methods=["POST"])
+def run_cycle_stream():
+    """
+    SSE streaming version of /api/cycle.
+    Streams text deltas as they arrive, then sends the full result at the end.
+    Body: same as /api/cycle
+    Returns: text/event-stream with events: text, tool_start, tool_done, done, error
+    """
+    import queue
+
+    data = request.get_json() or {}
+    user_message = data.get("userMessage")
+    run_n_active = data.get("runNActive", False)
+    privacy_nudge = data.get("privacyNudge", False)
+
+    # Held until the worker thread finishes (released in run_in_thread).
+    if not _cycle_lock.acquire(blocking=False):
+        return _cycle_busy_response()
+
+    data_queue = queue.Queue()
+
+    state = file_mgr.load_state()
+
+    if run_n_active:
+        state["_runNActive"] = True
+    if privacy_nudge:
+        state["_privacyNudge"] = True
+
+    # Consume queued messages
+    msg = user_message
+    if state.get("queuedMessages"):
+        queued = state["queuedMessages"]
+        state["queuedMessages"] = []
+        queued_text = "\n".join(
+            f"[Queued message from {qm.get('source', 'human')}: {qm['message']}]"
+            for qm in queued
+        )
+        msg = f"{queued_text}\n\n{user_message}" if user_message else queued_text
+
+    def on_text_stream(delta):
+        data_queue.put(("text", delta))
+
+    def on_tool_stream(event_type, tool_data):
+        data_queue.put((event_type, tool_data))
+
+    def run_in_thread():
+        try:
+            result = run_cycle_internal(state, msg, on_text=on_text_stream, on_tool=on_tool_stream)
+            # Clean up transient flags
+            state.pop("_runNActive", None)
+            state.pop("_privacyNudge", None)
+            file_mgr.save_state(state)
+            data_queue.put(("done", result))
+        except anthropic.APITimeoutError:
+            data_queue.put(("error", {"error": "Anthropic API timed out"}))
+        except Exception as e:
+            import traceback
+            logging.error(f"[Stream Cycle ERROR] {traceback.format_exc()}")
+            data_queue.put(("error", {"error": str(e)}))
+        finally:
+            _cycle_lock.release()
+
+    try:
+        thread = threading.Thread(target=run_in_thread, daemon=True)
+        thread.start()
+    except Exception:
+        _cycle_lock.release()
+        raise
+
+    def generate_sse():
+        while True:
+            try:
+                event_type, payload = data_queue.get(timeout=180)
+            except queue.Empty:
+                yield f"event: error\ndata: {json.dumps({'error': 'Stream timeout'})}\n\n"
+                return
+
+            if event_type == "text":
+                yield f"event: text\ndata: {json.dumps({'delta': payload})}\n\n"
+            elif event_type == "tool_start":
+                yield f"event: tool_start\ndata: {json.dumps(payload)}\n\n"
+            elif event_type == "tool_done":
+                yield f"event: tool_done\ndata: {json.dumps(payload)}\n\n"
+            elif event_type == "done":
+                # Send a small done signal (full state is fetched via /api/state)
+                done_signal = {
+                    "endStream": payload.get("endStream", False),
+                    "endStreamReason": payload.get("endStreamReason", ""),
+                    "compacted": payload.get("compacted", False),
+                }
+                yield f"event: done\ndata: {json.dumps(done_signal)}\n\n"
+                return
+            elif event_type == "error":
+                yield f"event: error\ndata: {json.dumps(payload)}\n\n"
+                return
+
+    return Response(generate_sse(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.route("/api/compact", methods=["POST"])
+@exclusive_cycle
 def trigger_compact():
     """Manually trigger compaction regardless of threshold."""
     state = file_mgr.load_state()
@@ -1247,6 +1642,7 @@ Take what resonates. Continue your stream however feels right."""
 
 
 @app.route("/api/import/present", methods=["POST"])
+@exclusive_cycle
 def present_import():
     """
     Present an import to Claude in chunks.

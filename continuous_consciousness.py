@@ -35,9 +35,15 @@ from datetime import datetime
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+from core_validation import (
+    check_stop_reason,
+    effective_integration_max_tokens,
+    validate_new_core,
+)
+
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-MODEL = "claude-opus-4-6"
+MODEL = "claude-sonnet-4-6"
 MAX_STREAM_TOKENS = 800              # Tokens per generation cycle
 COMPACTION_THRESHOLD = 200           # Number of stream segments before compacting (safety net)
 COMPACTION_TOKEN_THRESHOLD = 35000   # Total segment tokens before compaction triggers (primary)
@@ -349,8 +355,15 @@ Extract significant insights from the segments above. If nothing is genuinely si
 
         new_insights = response.content[0].text.strip()
 
+        # Reject truncated extractions (see core_validation.py)
+        extraction_reject = check_stop_reason(response.stop_reason)
+        if extraction_reject:
+            print(f"  Extraction rejected ({extraction_reject}); no insights added")
+
         # Append new insights (unless extraction found nothing)
-        if new_insights and new_insights != "(no new insights)":
+        if extraction_reject:
+            pass
+        elif new_insights and new_insights != "(no new insights)":
             if self.state.insights:
                 self.state.insights = self.state.insights + "\n\n" + new_insights
             else:
@@ -399,14 +412,20 @@ Return the updated Core Identity. Target ~{CORE_MAX_CHARS} characters."""
 
             integration_response = self.client.messages.create(
                 model=MODEL,
-                max_tokens=2000,
+                max_tokens=effective_integration_max_tokens(2000, CORE_MAX_CHARS),
                 messages=[{"role": "user", "content": integration_prompt}]
             )
 
             new_core = integration_response.content[0].text.strip()
-            self.state.memory_core = new_core
-            self.state.insights = remaining_insights
-            print(f"  Core Identity updated ({len(new_core)} chars). Insights trimmed to {len(remaining_insights)} chars.")
+            accepted, reject_reason = validate_new_core(
+                new_core, self.state.memory_core, integration_response.stop_reason)
+            if accepted:
+                self.state.memory_core = new_core
+                self.state.insights = remaining_insights
+                print(f"  Core Identity updated ({len(new_core)} chars). Insights trimmed to {len(remaining_insights)} chars.")
+            else:
+                # Keep the old core; staged insights stay in the Insights layer
+                print(f"  Integration rejected ({reject_reason}); keeping existing Core Identity.")
 
         self.state.save()
         print(f"  {len(remaining)} segments remain.\n")

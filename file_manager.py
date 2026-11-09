@@ -13,6 +13,8 @@ import os
 import json
 from datetime import datetime
 
+from path_safety import is_within
+
 
 DEFAULT_CONFIG = {
     "maxTokens": 600,
@@ -531,8 +533,7 @@ class FileManager:
         full_path = os.path.join(self.scratchpad_dir, safe_path)
 
         # Verify resolved path stays within scratchpad directory
-        resolved = os.path.realpath(full_path)
-        if not resolved.startswith(os.path.realpath(self.scratchpad_dir)):
+        if not is_within(self.scratchpad_dir, full_path):
             return {"error": "Access denied: path resolves outside scratchpad directory"}
 
         try:
@@ -570,8 +571,7 @@ class FileManager:
         full_path = os.path.join(self.research_dir, subfolder, safe_name)
 
         # Verify resolved path stays within research directory
-        resolved = os.path.realpath(full_path)
-        if not resolved.startswith(os.path.realpath(self.research_dir)):
+        if not is_within(self.research_dir, full_path):
             return {"error": "Access denied: path resolves outside research directory"}
 
         try:
@@ -610,8 +610,7 @@ class FileManager:
         full_path = os.path.join(base, safe_path)
 
         # Verify the resolved path is still within the base
-        resolved = os.path.realpath(full_path)
-        if not resolved.startswith(os.path.realpath(base)):
+        if not is_within(base, full_path):
             return {"error": "Access denied: path outside allowed directory"}
 
         if not os.path.exists(full_path):
@@ -693,8 +692,7 @@ class FileManager:
         full_path = os.path.join(base, safe_path)
 
         # Verify the resolved path is still within the base
-        resolved = os.path.realpath(full_path)
-        if not resolved.startswith(os.path.realpath(base)):
+        if not is_within(base, full_path):
             return {"error": "Access denied: path outside allowed directory"}
 
         if not os.path.exists(full_path):

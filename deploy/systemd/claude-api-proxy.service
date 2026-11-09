@@ -8,6 +8,10 @@ ExecStart=/usr/bin/python3 /srv/claude/proxy/api-proxy.py
 Restart=always
 RestartSec=5
 WorkingDirectory=/srv/claude/proxy
+# Optional: DAILY_BUDGET_USD=..., PROXY_UPSTREAM_API_KEY=sk-ant-...
+# (with the key here the container can use a dummy ANTHROPIC_API_KEY).
+# Keep this file root-owned, mode 600.
+EnvironmentFile=-/srv/claude/proxy/proxy.env
 
 # Security hardening
 ProtectSystem=strict

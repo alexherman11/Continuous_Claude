@@ -1,0 +1,111 @@
+#!/usr/sbin/nft -f
+#
+# Example host firewall for the Continuous Claude VPS (default-drop, both
+# directions). Install as /etc/nftables.conf and test with:
+#     nft -c -f /etc/nftables.conf     # syntax check only
+#     nft -f /etc/nftables.conf        # apply
+#
+# Before applying on a remote box, keep a second session open and schedule a
+# rollback (e.g. `sleep 120 && nft flush table inet filter` in tmux), so a
+# mistake can't lock you out.
+#
+# Notes
+# - Interfaces are matched by NAME (iifname/oifname), never by index
+#   (iif 3 / oif 3). Interface indices are assigned at boot and are not
+#   stable: after a reboot "3" pointed at a different interface and the
+#   rules locked the admin out.
+# - This file only manages `table inet filter`. Tailscale and podman install
+#   their own tables (ts-*, CNI-*) at runtime; we deliberately do not
+#   `flush ruleset`, which would wipe those. The delete/re-create idiom
+#   below replaces only our table.
+# - All addresses below are placeholders from documentation ranges
+#   (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) unless marked
+#   otherwise. Replace them with your own values.
+
+# ── Host-specific values (REPLACE) ─────────────────────────────────────
+# Public IP of this VPS. The rootless container (slirp4netns) reaches the
+# host-side API proxy on :8443 via this address, so output to it must be
+# allowed. Port 8443 is NOT opened for input from outside.
+define VPS_PUBLIC_IP = 203.0.113.10
+
+# Anthropic API. 160.79.104.0/23 is Anthropic's published API range (not a
+# placeholder); verify against current Anthropic docs before relying on it.
+define ANTHROPIC_API_CIDR = 160.79.104.0/23
+
+# Other HTTPS endpoints the host needs (telemetry, Matrix homeserver, CDN
+# fronting, ...). One entry per service you actually use.
+define EXTRA_HTTPS_ALLOW = { 198.51.100.0/24, 192.0.2.20 }
+
+# Package mirrors for apt/pip/npm (HTTP + HTTPS). Restrict to the mirrors
+# your distro and registries resolve to.
+define PACKAGE_MIRRORS = { 198.51.100.128/25 }
+
+# Upstream DNS resolver for the host. (The container itself runs with
+# --dns none and only resolves names pinned via --add-host.)
+define DNS_RESOLVER = 192.0.2.53
+
+# Tailscale MagicDNS resolver (fixed address inside every tailnet).
+define TAILSCALE_DNS = 100.100.100.100
+
+# ── Ruleset ────────────────────────────────────────────────────────────
+table inet filter
+delete table inet filter
+
+table inet filter {
+	chain input {
+		type filter hook input priority filter; policy drop;
+
+		iifname "lo" accept
+		# The API proxy (:8443) is for the local container only (it arrives
+		# via loopback). Don't expose it to the tailnet either.
+		tcp dport 8443 drop
+		# Admin access (including SSH) only over the tailnet.
+		iifname "tailscale0" accept
+		ct state established,related accept
+
+		# SSH is reachable only via tailscale0/lo (accepted above).
+		tcp dport 22 drop
+
+		# Tailscale direct-connection (WireGuard) port.
+		udp dport 41641 accept
+
+		# Public services: only if this host serves them (e.g. a Matrix
+		# homeserver behind a reverse proxy: 80/443 + federation 8448).
+		# Remove what you don't run.
+		tcp dport { 80, 443, 8448 } accept
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+	}
+
+	chain output {
+		type filter hook output priority filter; policy drop;
+
+		oifname "lo" accept
+		oifname "tailscale0" accept
+		ct state established,related accept
+
+		# Tailscale: WireGuard, STUN/DERP, MagicDNS.
+		udp dport 41641 accept
+		udp dport 3478 accept
+		ip daddr $TAILSCALE_DNS udp dport 53 accept
+		ip daddr $TAILSCALE_DNS tcp dport 53 accept
+
+		# Time sync.
+		udp dport 123 accept
+
+		# Host DNS.
+		ip daddr $DNS_RESOLVER udp dport 53 accept
+		ip daddr $DNS_RESOLVER tcp dport 53 accept
+
+		# Anthropic API (used by the host-side API proxy).
+		ip daddr $ANTHROPIC_API_CIDR tcp dport 443 accept
+
+		# Container -> host API proxy (and host-local HTTPS) via public IP.
+		ip daddr $VPS_PUBLIC_IP tcp dport { 443, 8443 } accept
+
+		ip daddr $EXTRA_HTTPS_ALLOW tcp dport 443 accept
+		ip daddr $PACKAGE_MIRRORS tcp dport { 80, 443 } accept
+	}
+}

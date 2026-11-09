@@ -34,14 +34,40 @@ mkdir -p "$CLAUDE_HOME/.claude"
 # Configure Claude Code to use the same API endpoint as the main engine
 # (routes through the API proxy on the host via --add-host mapping)
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    # Write Claude Code's config so it picks up the API key and proxy URL
-    cat > "$CLAUDE_HOME/.claude/settings.json" << CLICFG
-{
-  "permissions": {
-    "allow": ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "Agent"]
-  }
+    # Write Claude Code's user settings. ask_claude_code runs the CLI with
+    # cwd=/workspace/sandbox_workspace; the deny rules below stop its file
+    # editing tools from touching Tier 2/3 engine files, the change pipeline
+    # (proposed_changes/), the tool loader and the prompt/compaction files
+    # that have their own tools. The file lists come from change_manager.py
+    # so they stay in sync with the tier definitions.
+    # Deny rules don't cover Bash; the real fix is mounting engine code
+    # read-only (see SECURITY.md).
+    python3 - "$CLAUDE_HOME/.claude/settings.json" << 'PYCFG'
+import json, sys
+sys.path.insert(0, "/workspace")
+engine = "/workspace"
+try:
+    from change_manager import TIER_2_FILES, TIER_3_FILES
+    protected = sorted(TIER_2_FILES | TIER_3_FILES)
+except Exception as e:  # fall back to denying all top-level Python files
+    print(f"WARNING: could not import change_manager ({e}); denying /workspace/*.py", file=sys.stderr)
+    protected = ["*.py"]
+protected += [
+    "core_validation.py", "event_log.py", "path_safety.py",
+    "dynamic_tools/__init__.py", "dynamic_tools/enabled/**",
+    "proposed_changes/**", "scratchpad/memory_architecture/**",
+    "scratchpad/compaction/**", ".git/**",
+]
+deny = [f"Edit(/{engine}/{p})" for p in protected]  # "//abs/path" = absolute
+settings = {
+    "permissions": {
+        "allow": ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "Agent"],
+        "deny": deny,
+    }
 }
-CLICFG
+with open(sys.argv[1], "w") as f:
+    json.dump(settings, f, indent=2)
+PYCFG
     echo "[$(date -Iseconds)] Claude Code CLI configured (home=$CLAUDE_HOME)"
 fi
 

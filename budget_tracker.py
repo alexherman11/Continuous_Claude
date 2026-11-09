@@ -50,17 +50,38 @@ class BudgetTracker:
                 "total_cycles": 0,
             }
             self._save()
+        else:
+            # Persisted file is for today — but always let the constructor's
+            # daily_budget arg (from --budget CLI flag) override whatever was
+            # saved earlier. Before this, changing --budget 10 → 5 silently
+            # kept the old 10 for the rest of the day.
+            if self.data.get("daily_budget") != self.daily_budget:
+                self.data["daily_budget"] = self.daily_budget
+                self._save()
 
     def _save(self):
         os.makedirs(os.path.dirname(self.budget_path), exist_ok=True)
         with open(self.budget_path, "w") as f:
             json.dump(self.data, f, indent=2)
 
-    def log_cycle(self, cycle_num, input_tokens, output_tokens, api_calls=1):
-        """Log a cycle's token usage. Returns the cost of this cycle."""
+    def log_cycle(self, cycle_num, input_tokens, output_tokens, api_calls=1,
+                  cache_read_tokens=0, cache_creation_tokens=0):
+        """
+        Log a cycle's token usage. Returns the cost of this cycle.
+
+        Prompt-cache pricing (per Anthropic):
+          - cache writes cost 1.25× input price (paid once per breakpoint)
+          - cache reads  cost 0.1×  input price (paid on every subsequent call)
+        Before caching was wired up these two were always zero and the old
+        2-arg signature was fine. With caching on they dominate the cost of a
+        cycle — miss them and the runner undercounts spend by ~5×, blowing
+        past the daily budget without ever tripping it.
+        """
         cost = (
-            input_tokens * INPUT_PRICE_PER_MTOK
-            + output_tokens * OUTPUT_PRICE_PER_MTOK
+            input_tokens             * INPUT_PRICE_PER_MTOK
+            + output_tokens          * OUTPUT_PRICE_PER_MTOK
+            + cache_creation_tokens  * INPUT_PRICE_PER_MTOK * 1.25
+            + cache_read_tokens      * INPUT_PRICE_PER_MTOK * 0.10
         ) / 1_000_000
 
         self.data["cycles"].append({
@@ -68,6 +89,8 @@ class BudgetTracker:
             "timestamp": datetime.now().isoformat(),
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_creation_tokens": cache_creation_tokens,
             "api_calls": api_calls,
             "estimated_cost": round(cost, 4),
         })
@@ -77,7 +100,8 @@ class BudgetTracker:
 
         logger.info(
             f"Cycle {cycle_num} cost: ${cost:.4f} "
-            f"(in:{input_tokens}, out:{output_tokens}). "
+            f"(in:{input_tokens}, out:{output_tokens}, "
+            f"cache_r:{cache_read_tokens}, cache_w:{cache_creation_tokens}). "
             f"Daily total: ${self.data['total_spent']:.2f}/{self.daily_budget:.2f}"
         )
         return cost

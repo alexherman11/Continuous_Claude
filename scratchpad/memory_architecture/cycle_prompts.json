@@ -6,5 +6,5 @@
   "extraction_wrapper": "{extraction_prompt_base}\n\n---\n\n## CURRENT CORE IDENTITY:\n{current_core}\n\n## CURRENT INSIGHTS LAYER:\n{current_insights}\n\n## SEGMENTS BEING COMPACTED:\n{thoughts_text}\n\n---\n\nExtract significant insights from the segments above. If nothing is genuinely significant, output exactly: (no new content)",
   "integration_wrapper": "{integration_prompt_base}\n\n---\n\n## CURRENT CORE IDENTITY:\n{current_core}\n\n## STAGED INSIGHTS FOR EVALUATION:\n{staged_insights}\n\n---\n\nReturn the updated Core Identity. Target ~{core_max_chars} characters.",
   "extraction_max_tokens": 1500,
-  "integration_max_tokens": 2000
+  "integration_max_tokens": 6000
 }

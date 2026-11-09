@@ -13,14 +13,18 @@ Tier System:
   Tier 3: Core engine files → human approval + restart required
 """
 
+import ast
 import json
 import logging
 import os
+import posixpath
 import py_compile
 import shutil
 import subprocess
 import tempfile
 from datetime import datetime
+
+from path_safety import is_within
 
 _base_dir = os.path.dirname(os.path.abspath(__file__))
 PROPOSED_DIR = os.path.join(_base_dir, "proposed_changes")
@@ -76,15 +80,51 @@ def _next_change_id():
     return f"change_{next_num:04d}"
 
 
+def _normalize_target(target_file):
+    """
+    Normalize a model-supplied target path relative to the project root.
+
+    Returns (normalized_posix_path, None) or (None, error). Absolute paths
+    and paths that still contain ".." after normalization are rejected.
+    """
+    if not isinstance(target_file, str) or not target_file.strip():
+        return None, "target_file is empty"
+    t = target_file.strip().replace("\\", "/")
+    if t.startswith("/") or os.path.isabs(t) or (len(t) > 1 and t[1] == ":"):
+        return None, f"target_file must be relative to the project root: {target_file}"
+    norm = posixpath.normpath(t)
+    if norm in (".", "") or ".." in norm.split("/"):
+        return None, f"target_file escapes the project root: {target_file}"
+    return norm, None
+
+
+def _is_tier1_target(norm):
+    """Tier 1 = exactly dynamic_tools/enabled/<name>.py, name not starting with '_'."""
+    parts = norm.split("/")
+    return (
+        len(parts) == 3
+        and parts[0] == "dynamic_tools"
+        and parts[1] == "enabled"
+        and parts[2].endswith(".py")
+        and len(parts[2]) > len(".py")
+        and not parts[2].startswith("_")
+    )
+
+
 def _determine_tier(target_file):
     """Determine the review tier for a target file."""
-    basename = os.path.basename(target_file)
+    norm, err = _normalize_target(target_file)
+    if err:
+        return 3
+    basename = posixpath.basename(norm)
     if basename in TIER_3_FILES:
         return 3
     if basename in TIER_2_FILES:
         return 2
-    # Dynamic tools and new files are Tier 1
-    if target_file.startswith("dynamic_tools/"):
+    # Only a new/updated tool file directly in dynamic_tools/enabled/ is
+    # Tier 1. Everything else under dynamic_tools/ (notably the loader
+    # dynamic_tools/__init__.py, which runs every cycle) is not.
+    if _is_tier1_target(norm):
         return 1
     # Unknown files default to Tier 3 for safety
     return 3
@@ -101,32 +141,52 @@ def _validate_python_syntax(filepath):
 
 def _validate_dynamic_tool_contract(filepath):
     """
-    Validate that a file follows the dynamic tool contract:
-    - Exports SCHEMA dict with name, description, input_schema
-    - Exports callable execute()
+    Statically validate that a file follows the dynamic tool contract:
+    - module-level SCHEMA = {...} dict literal with name, description,
+      input_schema
+    - module-level def execute(...)
     Returns (ok: bool, error: str|None).
-    """
-    import importlib.util
-    try:
-        spec = importlib.util.spec_from_file_location("_validation_check", filepath)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
 
-        if not hasattr(module, "SCHEMA"):
-            return False, "Missing SCHEMA dict"
-        if not isinstance(module.SCHEMA, dict):
-            return False, "SCHEMA must be a dict"
-        required = {"name", "description", "input_schema"}
-        missing = required - set(module.SCHEMA.keys())
-        if missing:
-            return False, f"SCHEMA missing keys: {missing}"
-        if not hasattr(module, "execute"):
-            return False, "Missing execute() function"
-        if not callable(module.execute):
-            return False, "execute must be callable"
-        return True, None
-    except Exception as e:
-        return False, f"Import error: {type(e).__name__}: {e}"
+    The file is parsed with `ast` and never imported or executed: it is
+    model-written code, and "validating" it by importing would run it with
+    engine privileges before any review. (Tier 1 tools are still imported
+    by dynamic_tools/__init__.py once deployed -- see SECURITY.md.)
+    """
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            tree = ast.parse(f.read(), filename=filepath)
+    except SyntaxError as e:
+        return False, f"Syntax error: {e}"
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        return False, f"Could not read file: {type(e).__name__}: {e}"
+
+    schema_node = None
+    has_execute = False
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            if any(isinstance(t, ast.Name) and t.id == "SCHEMA" for t in node.targets):
+                schema_node = node.value
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == "SCHEMA":
+                schema_node = node.value
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "execute":
+            has_execute = True
+
+    if schema_node is None:
+        return False, "Missing module-level SCHEMA dict"
+    try:
+        schema = ast.literal_eval(schema_node)
+    except (ValueError, SyntaxError, TypeError):
+        return False, "SCHEMA must be a literal dict (no variables or function calls)"
+    if not isinstance(schema, dict):
+        return False, "SCHEMA must be a dict"
+    required = {"name", "description", "input_schema"}
+    missing = required - set(schema.keys())
+    if missing:
+        return False, f"SCHEMA missing keys: {missing}"
+    if not has_execute:
+        return False, "Missing module-level execute() function"
+    return True, None
 
 
 def propose_change(source_path, target_file, description, change_type, cycle=None):
@@ -158,12 +218,19 @@ def propose_change(source_path, target_file, description, change_type, cycle=Non
     if not source_content.strip():
         return {"error": "Source file is empty"}
 
+    norm_target, err = _normalize_target(target_file)
+    if err:
+        return {"error": err}
+    target_file = norm_target
+
     # Determine tier
     tier = _determine_tier(target_file)
 
-    # Validate Python syntax
+    # Validate Python syntax (by target too: a .txt source deployed as .py
+    # must not skip validation)
+    is_python = source_path.endswith(".py") or target_file.endswith(".py")
     validation = {"syntax": None, "contract": None}
-    if source_path.endswith(".py"):
+    if is_python:
         ok, err = _validate_python_syntax(source_path)
         validation["syntax"] = {"passed": ok, "error": err}
         if not ok:
@@ -176,7 +243,7 @@ def propose_change(source_path, target_file, description, change_type, cycle=Non
     # Validate dynamic tool contract for Tier 1
     # Accept various change_type names that indicate a dynamic tool
     _tool_change_types = ("new_tool", "modify_tool", "new_dynamic_tool", "modify_dynamic_tool")
-    if (change_type in _tool_change_types or target_file.startswith("dynamic_tools/")) and source_path.endswith(".py"):
+    if (change_type in _tool_change_types or tier == 1) and is_python:
         ok, err = _validate_dynamic_tool_contract(source_path)
         validation["contract"] = {"passed": ok, "error": err}
         if not ok:
@@ -255,12 +322,13 @@ def _deploy_change(change_id, manifest, source_content):
     """
     Deploy an approved change. Creates a git snapshot first for rollback.
     """
-    target_file = manifest["target_file"]
-    target_path = os.path.join(_base_dir, target_file)
+    target_file, err = _normalize_target(manifest.get("target_file", ""))
+    if err:
+        return {"error": f"Invalid target_file: {err}"}
+    target_path = os.path.join(_base_dir, *target_file.split("/"))
 
     # Path traversal guard: resolved path must stay within the project directory
-    resolved = os.path.realpath(target_path)
-    if not resolved.startswith(os.path.realpath(_base_dir) + os.sep):
+    if not is_within(_base_dir, target_path) or os.path.realpath(target_path) == os.path.realpath(_base_dir):
         return {"error": f"Path traversal blocked: {target_file} resolves outside project directory"}
 
     # Create git snapshot for rollback

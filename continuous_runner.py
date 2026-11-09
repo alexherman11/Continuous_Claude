@@ -63,6 +63,10 @@ def load_runner_config(config_path):
         "status_report_interval": 3600,
         "notify_on_budget_exhausted": True,
         "budget_override_keyword": "override budget",
+        # Matrix user IDs (e.g. "@you:example.org") allowed to use the budget
+        # override keyword. Empty = override disabled. Also settable via the
+        # comma-separated env var MATRIX_BUDGET_OVERRIDE_USERS.
+        "budget_override_allowed_senders": [],
     }
     try:
         with open(config_path) as f:
@@ -71,7 +75,27 @@ def load_runner_config(config_path):
         defaults.update(runner_cfg)
     except (FileNotFoundError, json.JSONDecodeError):
         logger.warning(f"Could not load runner config from {config_path}, using defaults")
+    env_senders = os.environ.get("MATRIX_BUDGET_OVERRIDE_USERS", "")
+    if env_senders.strip():
+        defaults["budget_override_allowed_senders"] = [
+            u.strip() for u in env_senders.split(",") if u.strip()
+        ]
     return defaults
+
+
+def is_budget_override(config, sender, body):
+    """True if `body` requests a budget override and `sender` may do so."""
+    keyword = config.get("budget_override_keyword", "")
+    if not keyword or keyword.lower() not in (body or "").lower():
+        return False
+    allowed = config.get("budget_override_allowed_senders") or []
+    if sender not in allowed:
+        logger.warning(
+            f"Ignoring budget override from {sender}: not in "
+            f"budget_override_allowed_senders"
+        )
+        return False
+    return True
 
 
 class ContinuousRunner:
@@ -127,9 +151,38 @@ class ContinuousRunner:
             resp = requests.post(
                 f"{self.flask_url}/api/cycle",
                 json={},
-                timeout=120,  # cycles can take a while with tool use
+                # Cycles routinely run 3-5 minutes now that tool-use loops
+                # go 10-15 rounds (each round is one API call + local tool
+                # execution, which can include ask_claude_code sub-sessions
+                # that take a minute on their own). 120s was timing out
+                # mid-cycle, which meant drain_matrix_outbox never fired and
+                # Claude's replies to Alex never reached Matrix. 600s covers
+                # the worst cycles we've seen with headroom.
+                timeout=600,
             )
-            resp.raise_for_status()
+            # Detect API-proxy budget exhaustion. The proxy 429s when the
+            # daily API-credit cap is hit; that bubbles up as a 500 from the
+            # Flask server with "Daily budget exceeded" in the error body.
+            # Without this check the runner retried every 30s forever, and
+            # even though each retry 429'd at the proxy (no cost), it
+            # spammed logs and drowned Matrix responsiveness.
+            if resp.status_code >= 400:
+                body = (resp.text or "")[:500]
+                if "Daily budget exceeded" in body or resp.status_code == 429:
+                    # Sync runner's local tracker to upstream reality so
+                    # should_run_cycle starts returning False and we stop
+                    # hammering until tomorrow's reset.
+                    self.budget.data["total_spent"] = max(
+                        self.budget.data.get("total_spent", 0.0),
+                        self.budget.daily_budget + 0.01,
+                    )
+                    self.budget._save()
+                    logger.warning(
+                        "API budget exhausted upstream — pausing cycles "
+                        "until next daily reset."
+                    )
+                    return None
+                resp.raise_for_status()
             result = resp.json()
             logger.info(
                 f"Cycle complete: cycle={result.get('segment', {}).get('cycle')}, "
@@ -270,10 +323,9 @@ class ContinuousRunner:
                     body = msg.get("body", "")
                     logger.info(f"Matrix message from {sender}: {body[:100]}")
 
-                    # Check for budget override
-                    override_kw = self.config.get("budget_override_keyword", "")
-                    if override_kw and override_kw.lower() in body.lower():
-                        logger.info("Budget override requested via Matrix")
+                    # Check for budget override (allowlisted senders only)
+                    if is_budget_override(self.config, sender, body):
+                        logger.info(f"Budget override requested via Matrix by {sender}")
                         # Temporarily allow one more cycle
                         self.budget.data["total_spent"] = max(
                             0, self.budget.data["total_spent"] - 0.10
@@ -297,6 +349,8 @@ class ContinuousRunner:
                             usage.get("input_tokens", 0),
                             usage.get("output_tokens", 0),
                             usage.get("api_calls", 1),
+                            cache_read_tokens=usage.get("cache_read_tokens", 0),
+                            cache_creation_tokens=usage.get("cache_creation_tokens", 0),
                         )
 
                         # Drain Matrix outbox
