@@ -458,6 +458,70 @@ def _default_post_process(raw_insights, compaction_num, compacted_cycles, state)
     return f"{header}\n\n{raw_insights.strip()}"
 
 
+# ── Compaction plugin output validation ───────────────────────────────
+# Plugins are editable by the model, so a plugin that returns wrong-but-valid
+# output (e.g. select_segments -> ([], segments)) must not silently disable
+# compaction. Each validator returns None if OK, else a reason string.
+
+def _validate_should_compact(out, segments):
+    if not (isinstance(out, (tuple, list)) and len(out) == 2):
+        return "expected (bool, str|None)"
+    if not isinstance(out[0], bool):
+        return f"first element must be bool, got {type(out[0]).__name__}"
+    if out[1] is not None and not isinstance(out[1], str):
+        return f"second element must be str or None, got {type(out[1]).__name__}"
+    return None
+
+
+def _validate_select_segments(out, segments):
+    if not (isinstance(out, (tuple, list)) and len(out) == 2):
+        return "expected (to_compact, remaining)"
+    to_compact, remaining = out
+    if not isinstance(to_compact, list) or not isinstance(remaining, list):
+        return "to_compact and remaining must both be lists"
+    if not to_compact:
+        return "to_compact is empty"
+    if to_compact + remaining != segments:
+        return "to_compact + remaining must equal the original segments, in order"
+    return None
+
+
+def _validate_str(out, *_):
+    if not isinstance(out, str):
+        return f"expected str, got {type(out).__name__}"
+    return None
+
+
+_PLUGIN_VALIDATORS = {
+    "should_compact": _validate_should_compact,
+    "select_segments": _validate_select_segments,
+    "format_segments": _validate_str,
+    "post_process": _validate_str,
+}
+
+
+def _run_compaction_stage(name, default_fn, args, validate_ctx=None):
+    """
+    Run a compaction stage via its plugin (if loaded), falling back to the
+    built-in default when the plugin raises or returns invalid output.
+    """
+    plugin = COMPACTION_PLUGINS.get(name)
+    if plugin is None:
+        return default_fn(*args)
+    try:
+        out = plugin(*args)
+    except Exception as e:
+        reason = f"exception: {type(e).__name__}: {e}"
+    else:
+        reason = _PLUGIN_VALIDATORS[name](out, validate_ctx)
+        if reason is None:
+            return out
+        reason = f"invalid output: {reason}"
+    logging.error(f"Compaction plugin {name} failed ({reason}), falling back to default")
+    log_event("compaction_plugin_fallback", plugin=name, reason=reason)
+    return default_fn(*args)
+
+
 def _usage_fields(response):
     """Extract token usage from an API response as plain ints (for events)."""
     usage = getattr(response, "usage", None)
@@ -502,8 +566,10 @@ def run_compaction(state):
       3. format_segments — HOW to present to the extraction LLM (default: [Cycle N] text)
       4. post_process    — HOW to structure the output insights (default: ### header + text)
 
-    The engine loads these every cycle. If a plugin is missing or broken,
-    the built-in default is used. Claude can safely experiment.
+    The engine loads these every cycle. If a plugin is missing, raises, or
+    returns output that violates its contract, the built-in default is used
+    (and a compaction_plugin_fallback event is logged). Claude can safely
+    experiment.
 
     Layer 2 (insights overflow → Core Identity integration) remains engine-controlled.
     """
@@ -511,14 +577,8 @@ def run_compaction(state):
     segments = state.get("segments", [])
 
     # ── Stage 1: Should we compact? (pluggable) ─────────────────────
-    should_compact_fn = COMPACTION_PLUGINS.get("should_compact", _default_should_compact)
-    try:
-        should, trigger_reason = should_compact_fn(state, segments, config)
-    except Exception as e:
-        logging.error(f"Compaction plugin should_compact crashed: {e}, falling back to default")
-        log_event("compaction_plugin_fallback", plugin="should_compact",
-                  reason=f"exception: {type(e).__name__}: {e}")
-        should, trigger_reason = _default_should_compact(state, segments, config)
+    should, trigger_reason = _run_compaction_stage(
+        "should_compact", _default_should_compact, (state, segments, config))
 
     if not should:
         return False
@@ -526,14 +586,10 @@ def run_compaction(state):
     logging.info(f"Compaction triggered: {trigger_reason}")
 
     # ── Stage 2: Select segments to compact (pluggable) ──────────────
-    select_fn = COMPACTION_PLUGINS.get("select_segments", _default_select_segments)
-    try:
-        to_compact, remaining = select_fn(segments, config)
-    except Exception as e:
-        logging.error(f"Compaction plugin select_segments crashed: {e}, falling back to default")
-        log_event("compaction_plugin_fallback", plugin="select_segments",
-                  reason=f"exception: {type(e).__name__}: {e}")
-        to_compact, remaining = _default_select_segments(segments, config)
+    # Plugin gets a copy so it can't reorder/mutate the list we validate against.
+    to_compact, remaining = _run_compaction_stage(
+        "select_segments", _default_select_segments, (list(segments), config),
+        validate_ctx=segments)
 
     # Safety: never compact everything
     if not remaining:
@@ -549,14 +605,8 @@ def run_compaction(state):
     current_core = state.get("memoryCore", "")
     current_insights = state.get("insights", "")
 
-    format_fn = COMPACTION_PLUGINS.get("format_segments", _default_format_segments)
-    try:
-        thoughts_text = format_fn(to_compact, state)
-    except Exception as e:
-        logging.error(f"Compaction plugin format_segments crashed: {e}, falling back to default")
-        log_event("compaction_plugin_fallback", plugin="format_segments",
-                  reason=f"exception: {type(e).__name__}: {e}")
-        thoughts_text = _default_format_segments(to_compact, state)
+    thoughts_text = _run_compaction_stage(
+        "format_segments", _default_format_segments, (to_compact, state))
 
     # Build extraction prompt from template (editable via cycle_prompts.json)
     extraction_wrapper = CYCLE_PROMPTS.get(
@@ -600,15 +650,12 @@ def run_compaction(state):
         )
 
     # ── Stage 4: Post-process insights (pluggable) ───────────────────
-    post_fn = COMPACTION_PLUGINS.get("post_process", _default_post_process)
-    try:
-        grouped_block = "" if extraction_reject else post_fn(
-            new_insights, compaction_num, compacted_cycles, state)
-    except Exception as e:
-        logging.error(f"Compaction plugin post_process crashed: {e}, falling back to default")
-        log_event("compaction_plugin_fallback", plugin="post_process",
-                  reason=f"exception: {type(e).__name__}: {e}")
-        grouped_block = _default_post_process(new_insights, compaction_num, compacted_cycles, state)
+    if extraction_reject:
+        grouped_block = ""
+    else:
+        grouped_block = _run_compaction_stage(
+            "post_process", _default_post_process,
+            (new_insights, compaction_num, compacted_cycles, state))
 
     # Append to insights layer
     if grouped_block:
