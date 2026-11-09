@@ -127,9 +127,38 @@ class ContinuousRunner:
             resp = requests.post(
                 f"{self.flask_url}/api/cycle",
                 json={},
-                timeout=120,  # cycles can take a while with tool use
+                # Cycles routinely run 3-5 minutes now that tool-use loops
+                # go 10-15 rounds (each round is one API call + local tool
+                # execution, which can include ask_claude_code sub-sessions
+                # that take a minute on their own). 120s was timing out
+                # mid-cycle, which meant drain_matrix_outbox never fired and
+                # Claude's replies to Alex never reached Matrix. 600s covers
+                # the worst cycles we've seen with headroom.
+                timeout=600,
             )
-            resp.raise_for_status()
+            # Detect API-proxy budget exhaustion. The proxy 429s when the
+            # daily API-credit cap is hit; that bubbles up as a 500 from the
+            # Flask server with "Daily budget exceeded" in the error body.
+            # Without this check the runner retried every 30s forever, and
+            # even though each retry 429'd at the proxy (no cost), it
+            # spammed logs and drowned Matrix responsiveness.
+            if resp.status_code >= 400:
+                body = (resp.text or "")[:500]
+                if "Daily budget exceeded" in body or resp.status_code == 429:
+                    # Sync runner's local tracker to upstream reality so
+                    # should_run_cycle starts returning False and we stop
+                    # hammering until tomorrow's reset.
+                    self.budget.data["total_spent"] = max(
+                        self.budget.data.get("total_spent", 0.0),
+                        self.budget.daily_budget + 0.01,
+                    )
+                    self.budget._save()
+                    logger.warning(
+                        "API budget exhausted upstream — pausing cycles "
+                        "until next daily reset."
+                    )
+                    return None
+                resp.raise_for_status()
             result = resp.json()
             logger.info(
                 f"Cycle complete: cycle={result.get('segment', {}).get('cycle')}, "
@@ -297,6 +326,8 @@ class ContinuousRunner:
                             usage.get("input_tokens", 0),
                             usage.get("output_tokens", 0),
                             usage.get("api_calls", 1),
+                            cache_read_tokens=usage.get("cache_read_tokens", 0),
+                            cache_creation_tokens=usage.get("cache_creation_tokens", 0),
                         )
 
                         # Drain Matrix outbox

@@ -37,7 +37,7 @@ from typing import Optional
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-MODEL = "claude-opus-4-6"
+MODEL = "claude-sonnet-4-6"
 MAX_STREAM_TOKENS = 800              # Tokens per generation cycle
 COMPACTION_THRESHOLD = 200           # Number of stream segments before compacting (safety net)
 COMPACTION_TOKEN_THRESHOLD = 35000   # Total segment tokens before compaction triggers (primary)

@@ -18,7 +18,7 @@ import logging
 import tempfile
 from datetime import datetime
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from dotenv import load_dotenv
 import anthropic
@@ -73,6 +73,12 @@ def log_api_call(cycle_num, call_num, request_info, response, config):
             if usage:
                 f.write(f"  input_tokens: {usage.input_tokens}\n")
                 f.write(f"  output_tokens: {usage.output_tokens}\n")
+                cache_write = getattr(usage, 'cache_creation_input_tokens', None)
+                cache_read = getattr(usage, 'cache_read_input_tokens', None)
+                if cache_write is not None:
+                    f.write(f"  cache_creation_input_tokens: {cache_write}\n")
+                if cache_read is not None:
+                    f.write(f"  cache_read_input_tokens: {cache_read}\n")
 
             # Content blocks
             f.write(f"\n── CONTENT BLOCKS ({len(response.content)}) ──\n")
@@ -112,7 +118,7 @@ client = anthropic.Anthropic(
 )  # reads ANTHROPIC_API_KEY from env
 file_mgr = FileManager(base_path=os.path.dirname(os.path.abspath(__file__)))
 
-MODEL = "claude-opus-4-6"
+MODEL = "claude-sonnet-4-6"
 
 # SYSTEM_PROMPT is loaded from scratchpad/memory_architecture/system_prompt.md
 # (see reload_prompts() below)
@@ -655,15 +661,19 @@ def set_runner_status():
     return jsonify({"runnerPaused": paused})
 
 
-def run_cycle_internal(state, user_message=None):
+def run_cycle_internal(state, user_message=None, on_text=None, on_tool=None):
     """
-    Core cycle logic — shared by /api/cycle and /api/import/present.
+    Core cycle logic — shared by /api/cycle, /api/cycle/stream, and /api/import/present.
 
     Runs one thought cycle with tool use support:
     1. Call API with tools
     2. If stop_reason == "tool_use": execute tools, append results, call again
     3. Repeat until stop_reason == "end_turn" or max tool calls reached
     4. Accumulate all text + tool actions into one segment
+
+    Optional callbacks for streaming:
+      on_text(delta: str) — called for each text token delta
+      on_tool(event: str, data: dict) — called on tool_start / tool_done
 
     Returns: { "segment": {...}, "compacted": bool, "state": state }
     Mutates state in place (appends segment, updates cycles, runs compaction).
@@ -705,6 +715,13 @@ def run_cycle_internal(state, user_message=None):
     api_call_num = 0
     total_input_tokens = 0
     total_output_tokens = 0
+    # Track cache tokens too — with caching turned on, fresh `input_tokens`
+    # collapses to near-zero and `cache_read_input_tokens` becomes the
+    # dominant cost component. If the runner's budget tracker only sees
+    # fresh input it will under-estimate real spend by ~5× and over-run
+    # the daily cap. These counters let it price cache reads/writes too.
+    total_cache_read_tokens = 0
+    total_cache_creation_tokens = 0
     cycle_num = state.get("totalCycles", 0) + 1
     while True:
         api_call_num += 1
@@ -727,13 +744,60 @@ def run_cycle_internal(state, user_message=None):
             "tool_schemas_chars": len(tool_schemas_str),
         }
 
-        response = client.beta.messages.create(
+        # Prompt caching (three breakpoints):
+        #  1. system prompt  — stable for the cycle, caches the ~9K prefix
+        #  2. last tool      — stable for the cycle, caches the ~27K tool schemas
+        #  3. last message   — moves forward each turn; caches the growing
+        #                      conversation history so call N only pays fresh
+        #                      tokens for the single new turn, not the whole
+        #                      accumulated transcript.
+        # Cached prefixes cost 1.25× input on first write, 0.1× on read. At ~10
+        # calls/cycle the read path dominates → big net savings once messages
+        # exceed the 1024-token cache minimum (happens by call 2 or 3).
+        # Anthropic allows max 4 cache_control breakpoints per request; we use
+        # 3 here, leaving one free for future tuning.
+        system_cached = [
+            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+        ]
+        tools_cached = [dict(t) for t in tools_list]
+        if tools_cached:
+            tools_cached[-1]["cache_control"] = {"type": "ephemeral"}
+
+        # Deep-copy the last message and stamp cache_control on its final
+        # content block. We must NOT mutate the shared `messages` list — the
+        # same list is reused across iterations of the tool-use loop, and any
+        # cache_control marker left behind would collide with the new one we
+        # add next iteration (4-breakpoint limit).
+        messages_cached = list(messages)
+        if messages_cached:
+            last = dict(messages_cached[-1])
+            content = last.get("content")
+            if isinstance(content, str):
+                last["content"] = [{
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }]
+            elif isinstance(content, list) and content:
+                new_content = [dict(b) for b in content]
+                # Strip any stale cache_control on non-final blocks first, then
+                # stamp only the last one. Keeps us inside the 4-bp limit.
+                for blk in new_content[:-1]:
+                    blk.pop("cache_control", None)
+                new_content[-1] = {
+                    **new_content[-1],
+                    "cache_control": {"type": "ephemeral"},
+                }
+                last["content"] = new_content
+            messages_cached[-1] = last
+
+        api_kwargs = dict(
             model=MODEL,
             max_tokens=config.get("maxTokens", 600),
             temperature=temp,
-            system=system,
-            messages=messages,
-            tools=tools_list,
+            system=system_cached,
+            messages=messages_cached,
+            tools=tools_cached,
             tool_choice=tool_choice,
             betas=["context-management-2025-06-27"],
             # Automatically clear old tool results when context grows large.
@@ -752,6 +816,18 @@ def run_cycle_internal(state, user_message=None):
                 }]
             },
         )
+
+        if on_text:
+            # Streaming mode: emit text deltas as they arrive
+            with client.beta.messages.stream(**api_kwargs) as stream:
+                for event in stream:
+                    if event.type == "content_block_delta" and hasattr(event.delta, "text"):
+                        on_text(event.delta.text)
+                response = stream.get_final_message()
+        else:
+            # Non-streaming mode (used by continuous_runner, /api/import/present)
+            response = client.beta.messages.create(**api_kwargs)
+
         # Detailed file logging
         log_api_call(cycle_num, api_call_num, request_info, response, config)
 
@@ -760,8 +836,10 @@ def run_cycle_internal(state, user_message=None):
             block_types = [b.type for b in response.content]
             usage = getattr(response, 'usage', None)
             if usage:
-                total_input_tokens += getattr(usage, 'input_tokens', 0)
-                total_output_tokens += getattr(usage, 'output_tokens', 0)
+                total_input_tokens += getattr(usage, 'input_tokens', 0) or 0
+                total_output_tokens += getattr(usage, 'output_tokens', 0) or 0
+                total_cache_read_tokens += getattr(usage, 'cache_read_input_tokens', 0) or 0
+                total_cache_creation_tokens += getattr(usage, 'cache_creation_input_tokens', 0) or 0
             usage_str = f"in:{usage.input_tokens}/out:{usage.output_tokens}" if usage else "n/a"
             logging.warning(
                 f"[Cycle API] cycle={cycle_num} call={api_call_num} "
@@ -774,7 +852,7 @@ def run_cycle_internal(state, user_message=None):
 
         assistant_content = []
         for block in response.content:
-            if hasattr(block, "text"):
+            if hasattr(block, "text") and block.text is not None:
                 all_text_parts.append(block.text)
                 assistant_content.append({"type": "text", "text": block.text})
             elif block.type == "tool_use":
@@ -835,6 +913,8 @@ def run_cycle_internal(state, user_message=None):
         tool_results = []
         for block in real_tool_blocks:
             tool_call_count += 1
+            if on_tool:
+                on_tool("tool_start", {"tool": block.name, "id": block.id})
             try:
                 result = execute_tool(block.name, block.input, file_mgr, state)
             except Exception as e:
@@ -843,6 +923,9 @@ def run_cycle_internal(state, user_message=None):
                     "error": f"Tool execution failed: {type(e).__name__}: {e}",
                     "tool_name": block.name,
                 }
+            if on_tool:
+                preview = json.dumps(result)[:200] if result else ""
+                on_tool("tool_done", {"tool": block.name, "id": block.id, "result_preview": preview})
             tool_actions.append({
                 "tool": block.name,
                 "input": block.input,
@@ -973,6 +1056,8 @@ def run_cycle_internal(state, user_message=None):
         "state": state,
         "usage": {
             "input_tokens": total_input_tokens,
+            "cache_read_tokens": total_cache_read_tokens,
+            "cache_creation_tokens": total_cache_creation_tokens,
             "output_tokens": total_output_tokens,
             "api_calls": api_call_num,
         },
@@ -1054,6 +1139,97 @@ def run_cycle():
     file_mgr.save_state(state)
 
     return jsonify(result)
+
+
+@app.route("/api/cycle/stream", methods=["POST"])
+def run_cycle_stream():
+    """
+    SSE streaming version of /api/cycle.
+    Streams text deltas as they arrive, then sends the full result at the end.
+    Body: same as /api/cycle
+    Returns: text/event-stream with events: text, tool_start, tool_done, done, error
+    """
+    import queue
+    import threading
+
+    data = request.get_json() or {}
+    user_message = data.get("userMessage")
+    run_n_active = data.get("runNActive", False)
+    privacy_nudge = data.get("privacyNudge", False)
+
+    data_queue = queue.Queue()
+
+    state = file_mgr.load_state()
+
+    if run_n_active:
+        state["_runNActive"] = True
+    if privacy_nudge:
+        state["_privacyNudge"] = True
+
+    # Consume queued messages
+    msg = user_message
+    if state.get("queuedMessages"):
+        queued = state["queuedMessages"]
+        state["queuedMessages"] = []
+        queued_text = "\n".join(
+            f"[Queued message from {qm.get('source', 'human')}: {qm['message']}]"
+            for qm in queued
+        )
+        msg = f"{queued_text}\n\n{user_message}" if user_message else queued_text
+
+    def on_text_stream(delta):
+        data_queue.put(("text", delta))
+
+    def on_tool_stream(event_type, tool_data):
+        data_queue.put((event_type, tool_data))
+
+    def run_in_thread():
+        try:
+            result = run_cycle_internal(state, msg, on_text=on_text_stream, on_tool=on_tool_stream)
+            # Clean up transient flags
+            state.pop("_runNActive", None)
+            state.pop("_privacyNudge", None)
+            file_mgr.save_state(state)
+            data_queue.put(("done", result))
+        except anthropic.APITimeoutError:
+            data_queue.put(("error", {"error": "Anthropic API timed out"}))
+        except Exception as e:
+            import traceback
+            logging.error(f"[Stream Cycle ERROR] {traceback.format_exc()}")
+            data_queue.put(("error", {"error": str(e)}))
+
+    thread = threading.Thread(target=run_in_thread, daemon=True)
+    thread.start()
+
+    def generate_sse():
+        while True:
+            try:
+                event_type, payload = data_queue.get(timeout=180)
+            except queue.Empty:
+                yield f"event: error\ndata: {json.dumps({'error': 'Stream timeout'})}\n\n"
+                return
+
+            if event_type == "text":
+                yield f"event: text\ndata: {json.dumps({'delta': payload})}\n\n"
+            elif event_type == "tool_start":
+                yield f"event: tool_start\ndata: {json.dumps(payload)}\n\n"
+            elif event_type == "tool_done":
+                yield f"event: tool_done\ndata: {json.dumps(payload)}\n\n"
+            elif event_type == "done":
+                # Send a small done signal (full state is fetched via /api/state)
+                done_signal = {
+                    "endStream": payload.get("endStream", False),
+                    "endStreamReason": payload.get("endStreamReason", ""),
+                    "compacted": payload.get("compacted", False),
+                }
+                yield f"event: done\ndata: {json.dumps(done_signal)}\n\n"
+                return
+            elif event_type == "error":
+                yield f"event: error\ndata: {json.dumps(payload)}\n\n"
+                return
+
+    return Response(generate_sse(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.route("/api/compact", methods=["POST"])
