@@ -63,6 +63,10 @@ def load_runner_config(config_path):
         "status_report_interval": 3600,
         "notify_on_budget_exhausted": True,
         "budget_override_keyword": "override budget",
+        # Matrix user IDs (e.g. "@you:example.org") allowed to use the budget
+        # override keyword. Empty = override disabled. Also settable via the
+        # comma-separated env var MATRIX_BUDGET_OVERRIDE_USERS.
+        "budget_override_allowed_senders": [],
     }
     try:
         with open(config_path) as f:
@@ -71,7 +75,27 @@ def load_runner_config(config_path):
         defaults.update(runner_cfg)
     except (FileNotFoundError, json.JSONDecodeError):
         logger.warning(f"Could not load runner config from {config_path}, using defaults")
+    env_senders = os.environ.get("MATRIX_BUDGET_OVERRIDE_USERS", "")
+    if env_senders.strip():
+        defaults["budget_override_allowed_senders"] = [
+            u.strip() for u in env_senders.split(",") if u.strip()
+        ]
     return defaults
+
+
+def is_budget_override(config, sender, body):
+    """True if `body` requests a budget override and `sender` may do so."""
+    keyword = config.get("budget_override_keyword", "")
+    if not keyword or keyword.lower() not in (body or "").lower():
+        return False
+    allowed = config.get("budget_override_allowed_senders") or []
+    if sender not in allowed:
+        logger.warning(
+            f"Ignoring budget override from {sender}: not in "
+            f"budget_override_allowed_senders"
+        )
+        return False
+    return True
 
 
 class ContinuousRunner:
@@ -299,10 +323,9 @@ class ContinuousRunner:
                     body = msg.get("body", "")
                     logger.info(f"Matrix message from {sender}: {body[:100]}")
 
-                    # Check for budget override
-                    override_kw = self.config.get("budget_override_keyword", "")
-                    if override_kw and override_kw.lower() in body.lower():
-                        logger.info("Budget override requested via Matrix")
+                    # Check for budget override (allowlisted senders only)
+                    if is_budget_override(self.config, sender, body):
+                        logger.info(f"Budget override requested via Matrix by {sender}")
                         # Temporarily allow one more cycle
                         self.budget.data["total_spent"] = max(
                             0, self.budget.data["total_spent"] - 0.10
