@@ -5,7 +5,11 @@ Transparent API proxy for Anthropic API calls.
 Runs on the host, intercepts API traffic from the Claude container,
 logs everything to the audit log, and forwards to the real API.
 
-Auth: reads ANTHROPIC_API_KEY from env, sends as X-Api-Key header.
+Auth: by default forwards the caller's x-api-key / Authorization headers
+unchanged (so the API key lives in the container). If PROXY_UPSTREAM_API_KEY
+is set, the proxy strips the caller's auth headers and injects that key, so
+the container can run with a dummy ANTHROPIC_API_KEY and never sees the
+real one.
 Budget: tracks daily spend (persisted to disk), rejects over-budget calls.
 
 Security: This runs outside all containers. Claude cannot modify it.
@@ -76,6 +80,11 @@ def _pricing_for(model_id):
         if m.startswith(key):
             return MODEL_PRICING[key]
     return DEFAULT_PRICING
+
+# Optional host-held API key. When set, caller auth is replaced with this
+# key (see module docstring). Unset/empty = forward caller auth (default).
+UPSTREAM_API_KEY = os.environ.get("PROXY_UPSTREAM_API_KEY", "").strip()
+_CALLER_AUTH_HEADERS = ("x-api-key", "authorization")
 
 # TLS certificate paths (self-signed, generated during setup)
 CERT_FILE = "/srv/claude/proxy/proxy-cert.pem"
@@ -360,9 +369,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             # Copy headers (except Host, which we override)
             forward_headers = {}
             for key, value in self.headers.items():
-                if key.lower() not in ("host", "transfer-encoding"):
-                    forward_headers[key] = value
+                if key.lower() in ("host", "transfer-encoding"):
+                    continue
+                if UPSTREAM_API_KEY and key.lower() in _CALLER_AUTH_HEADERS:
+                    continue  # replaced with the host-held key below
+                forward_headers[key] = value
             forward_headers["Host"] = TARGET_HOST
+            if UPSTREAM_API_KEY:
+                forward_headers["x-api-key"] = UPSTREAM_API_KEY
 
             conn.request(method, self.path, body=request_body,
                         headers=forward_headers)
@@ -383,7 +397,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             # Classify auth: OAuth Bearer tokens (claude-code-cli) bill to the
             # user's Max/Pro subscription, not to API credits. Don't charge
             # them against the daily API budget — only x-api-key calls count.
-            auth_scheme = "oauth" if str(self.headers.get("Authorization", "")).lower().startswith("bearer ") else "api_key"
+            # With a host-held key every call is billed to that key.
+            if UPSTREAM_API_KEY:
+                auth_scheme = "api_key"
+            else:
+                auth_scheme = "oauth" if str(self.headers.get("Authorization", "")).lower().startswith("bearer ") else "api_key"
 
             _log_api_call(method, self.path, request_body.decode("utf-8", errors="replace"),
                          response.status, body_for_logging,
@@ -417,6 +435,8 @@ def main():
     logger.info(f"Starting API proxy on {LISTEN_HOST}:{LISTEN_PORT}")
     logger.info(f"Forwarding to {TARGET_HOST}:{TARGET_PORT}")
     logger.info(f"Daily budget: ${DAILY_BUDGET_USD}")
+    logger.info("Upstream auth: " + ("host-held key (PROXY_UPSTREAM_API_KEY)"
+                                      if UPSTREAM_API_KEY else "forwarding caller headers"))
 
     server = http.server.HTTPServer((LISTEN_HOST, LISTEN_PORT), ProxyHandler)
 
