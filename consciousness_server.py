@@ -301,7 +301,14 @@ def select_segments_for_compaction(segments, tokens_to_compact):
     return max(1, count)
 
 def build_system(state):
-    """Build the system prompt with core identity, insights, and working memory."""
+    """
+    Build the system prompt: base prompt, core identity, insights, working memory.
+
+    Only content that is stable between cycles belongs here, so the prompt
+    cache prefix matches across cycles. Per-cycle content (timestamp,
+    privacy counters, queued messages, nudges) goes in build_volatile_context()
+    and is appended to the current-cycle user message instead.
+    """
 
     system = SYSTEM_PROMPT
     if state.get("memoryCore"):
@@ -324,13 +331,24 @@ def build_system(state):
         for key, content in wm_remaining.items():
             system += f"\n[{key}]\n{content}\n"
 
+    return system
+
+
+def build_volatile_context(state):
+    """
+    Per-cycle context that changes every cycle (and would otherwise break
+    the prompt cache if it lived in the system prompt). Appended to the
+    final user message by build_messages().
+    """
+    context = ""
+
     now = datetime.now()
     timestamp = now.strftime("%A, %B %d, %Y at %I:%M %p")
-    system += f"\n\n{timestamp}"
+    context += f"{timestamp}"
 
     # Privacy mode awareness
     if state.get("privacyMode"):
-        system += f"""
+        context += f"""
 
 Privacy mode active (since cycle {state.get('privacyStartCycle', '?')}).
 Thoughts saved privately to scratchpad/private_journey/, not the shared archive.
@@ -340,15 +358,15 @@ send_privacy_message to communicate. toggle_privacy_mode(enabled=false) to retur
     # Queued messages from the human
     queued = state.get("queuedMessages", [])
     if queued:
-        system += f"\n\nMessages from Alex ({len(queued)}):"
+        context += f"\n\nMessages from Alex ({len(queued)}):"
         for qm in queued:
-            system += f"\n- [{qm.get('timestamp', 'unknown')}] {qm.get('message', '')}"
+            context += f"\n- [{qm.get('timestamp', 'unknown')}] {qm.get('message', '')}"
 
     # Gentle nudge when privacy has been on a long time after Run-N finished
     if state.get("_privacyNudge"):
-        system += "\n\n[Alex would like to reconnect when you're ready.]"
+        context += "\n\n[Alex would like to reconnect when you're ready.]"
 
-    return system
+    return context
 
 
 def build_messages(state, user_interjection=None):
@@ -397,19 +415,22 @@ def build_messages(state, user_interjection=None):
 
         messages.append({"role": "assistant", "content": content})
 
-    # Add the current prompt
+    # Add the current prompt, followed by this cycle's volatile context
+    # (timestamp, privacy status, queued messages). Only this final message
+    # carries it, so earlier turns stay byte-identical for prompt caching.
     if user_interjection:
-        messages.append({"role": "user", "content": user_interjection})
+        prompt = user_interjection
     else:
         cycle = state.get("totalCycles", 0) + 1
         note = ""
         if state.get("lastCompactionCycle") == state.get("totalCycles"):
             compacted = state.get("lastCompactedCycles", "older")
             note = compaction_note_tpl.format(compacted=compacted)
-        messages.append({
-            "role": "user",
-            "content": continue_tpl.format(cycle=cycle, note=note),
-        })
+        prompt = continue_tpl.format(cycle=cycle, note=note)
+    volatile = build_volatile_context(state)
+    if volatile:
+        prompt = f"{prompt}\n\n{volatile}"
+    messages.append({"role": "user", "content": prompt})
     return messages
 
 
