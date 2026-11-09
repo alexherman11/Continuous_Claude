@@ -22,6 +22,8 @@ import subprocess
 import tempfile
 from datetime import datetime
 
+from path_safety import is_within
+
 _base_dir = os.path.dirname(os.path.abspath(__file__))
 PROPOSED_DIR = os.path.join(_base_dir, "proposed_changes")
 PENDING_DIR = os.path.join(PROPOSED_DIR, "pending")
@@ -259,8 +261,7 @@ def _deploy_change(change_id, manifest, source_content):
     target_path = os.path.join(_base_dir, target_file)
 
     # Path traversal guard: resolved path must stay within the project directory
-    resolved = os.path.realpath(target_path)
-    if not resolved.startswith(os.path.realpath(_base_dir) + os.sep):
+    if not is_within(_base_dir, target_path) or os.path.realpath(target_path) == os.path.realpath(_base_dir):
         return {"error": f"Path traversal blocked: {target_file} resolves outside project directory"}
 
     # Create git snapshot for rollback
