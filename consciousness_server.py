@@ -16,7 +16,9 @@ import sys
 import json
 import logging
 import tempfile
+import threading
 from datetime import datetime
+from functools import wraps
 
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
@@ -840,6 +842,31 @@ def set_runner_status():
     return jsonify({"runnerPaused": paused})
 
 
+# ── Cycle exclusivity ─────────────────────────────────────────────────
+# Cycles load state.json, run for minutes, then save it. Two overlapping
+# cycles (e.g. the runner's HTTP request times out while a long
+# ask_claude_code call is still running, and it starts another) would
+# each save their own copy and silently drop the other's segment.
+_cycle_lock = threading.Lock()
+
+
+def _cycle_busy_response():
+    return jsonify({"error": "A cycle or compaction is already in progress"}), 409
+
+
+def exclusive_cycle(fn):
+    """Run the endpoint only if no other cycle/compaction is running."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not _cycle_lock.acquire(blocking=False):
+            return _cycle_busy_response()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _cycle_lock.release()
+    return wrapper
+
+
 def run_cycle_internal(state, user_message=None, on_text=None, on_tool=None):
     """
     Core cycle logic — shared by /api/cycle, /api/cycle/stream, and /api/import/present.
@@ -1253,6 +1280,7 @@ def run_cycle_internal(state, user_message=None, on_text=None, on_tool=None):
 
 
 @app.route("/api/cycle", methods=["POST"])
+@exclusive_cycle
 def run_cycle():
     """
     Run one thought cycle.
@@ -1331,12 +1359,15 @@ def run_cycle_stream():
     Returns: text/event-stream with events: text, tool_start, tool_done, done, error
     """
     import queue
-    import threading
 
     data = request.get_json() or {}
     user_message = data.get("userMessage")
     run_n_active = data.get("runNActive", False)
     privacy_nudge = data.get("privacyNudge", False)
+
+    # Held until the worker thread finishes (released in run_in_thread).
+    if not _cycle_lock.acquire(blocking=False):
+        return _cycle_busy_response()
 
     data_queue = queue.Queue()
 
@@ -1378,9 +1409,15 @@ def run_cycle_stream():
             import traceback
             logging.error(f"[Stream Cycle ERROR] {traceback.format_exc()}")
             data_queue.put(("error", {"error": str(e)}))
+        finally:
+            _cycle_lock.release()
 
-    thread = threading.Thread(target=run_in_thread, daemon=True)
-    thread.start()
+    try:
+        thread = threading.Thread(target=run_in_thread, daemon=True)
+        thread.start()
+    except Exception:
+        _cycle_lock.release()
+        raise
 
     def generate_sse():
         while True:
@@ -1414,6 +1451,7 @@ def run_cycle_stream():
 
 
 @app.route("/api/compact", methods=["POST"])
+@exclusive_cycle
 def trigger_compact():
     """Manually trigger compaction regardless of threshold."""
     state = file_mgr.load_state()
@@ -1604,6 +1642,7 @@ Take what resonates. Continue your stream however feels right."""
 
 
 @app.route("/api/import/present", methods=["POST"])
+@exclusive_cycle
 def present_import():
     """
     Present an import to Claude in chunks.
