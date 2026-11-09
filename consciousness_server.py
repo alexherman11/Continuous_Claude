@@ -886,11 +886,10 @@ def run_cycle_internal(state, user_message=None, on_text=None, on_tool=None):
     tools_list = build_tools_with_search(context_active_tools=context_active_tools)
 
     # ── Tool use loop ─────────────────────────────────────────────
-    # First call uses "auto" so Claude generates text naturally.
-    # Subsequent calls (after tool results) use "any" to prevent the
-    # failure mode where Claude describes tool use in text then hits
-    # end_turn without emitting a tool_use block (happens at long context).
-    # Claude uses finish_cycle to cleanly exit the tool loop.
+    # Every call uses tool_choice "auto": Claude may answer with text, call
+    # tools, or both. The loop continues while stop_reason == "tool_use" and
+    # ends on any other stop_reason, when finish_cycle is called, or when
+    # MAX_TOOL_CALLS_PER_CYCLE is reached.
     api_call_num = 0
     total_input_tokens = 0
     total_output_tokens = 0
