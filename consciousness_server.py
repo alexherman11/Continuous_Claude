@@ -33,6 +33,11 @@ from tool_definitions import TOOL_SCHEMAS, execute_tool, MAX_TOOL_CALLS_PER_CYCL
 from dynamic_tools import load_dynamic_tools, get_dynamic_schemas
 from change_manager import apply_approved_changes
 from event_log import log_event
+from core_validation import (
+    check_stop_reason,
+    effective_integration_max_tokens,
+    validate_new_core,
+)
 
 # ── Setup ─────────────────────────────────────────────────────────────
 
@@ -568,6 +573,13 @@ def run_compaction(state):
 
     response = _compaction_api_call("extraction", extraction_prompt, extraction_max_tokens, state)
     new_insights = response.content[0].text.strip()
+
+    # Reject truncated extractions: a cut-off insight block would be fed into
+    # the core later as if it were complete. The compacted segments are still
+    # removed from context (they remain in the segment archive and
+    # research/archive/), otherwise the same over-long extraction would be
+    # retried every cycle. The rejected text is kept in the event log.
+    extraction_reject = check_stop_reason(response.stop_reason)
     log_event(
         "compaction_extraction",
         compaction=compaction_num,
@@ -575,13 +587,23 @@ def run_compaction(state):
         stop_reason=response.stop_reason,
         max_tokens=extraction_max_tokens,
         insights_chars=len(new_insights),
+        accepted=extraction_reject is None,
+        reject_reason=extraction_reject,
+        rejected_text=new_insights if extraction_reject else None,
         **_usage_fields(response),
     )
+    if extraction_reject:
+        logging.error(
+            f"Compaction #{compaction_num}: extraction rejected ({extraction_reject}); "
+            f"no insights added for cycles {compacted_cycles[0]}-{compacted_cycles[-1]}. "
+            f"Consider raising extraction_max_tokens in cycle_prompts.json."
+        )
 
     # ── Stage 4: Post-process insights (pluggable) ───────────────────
     post_fn = COMPACTION_PLUGINS.get("post_process", _default_post_process)
     try:
-        grouped_block = post_fn(new_insights, compaction_num, compacted_cycles, state)
+        grouped_block = "" if extraction_reject else post_fn(
+            new_insights, compaction_num, compacted_cycles, state)
     except Exception as e:
         logging.error(f"Compaction plugin post_process crashed: {e}, falling back to default")
         log_event("compaction_plugin_fallback", plugin="post_process",
@@ -644,18 +666,24 @@ def run_compaction(state):
             "integration_wrapper",
             "{integration_prompt_base}\n\n---\n\n## CURRENT CORE IDENTITY:\n{current_core}\n\n## STAGED INSIGHTS FOR EVALUATION:\n{staged_insights}\n\n---\n\nReturn the updated Core Identity. Target ~{core_max_chars} characters.",
         )
+        core_max_chars = config.get("coreMaxChars", 3500)
         integration_prompt = integration_wrapper.format(
             integration_prompt_base=INTEGRATION_PROMPT_BASE,
             current_core=current_core or "(not yet established)",
             staged_insights=staged_insights,
-            core_max_chars=config.get("coreMaxChars", 3500),
+            core_max_chars=core_max_chars,
         )
-        integration_max_tokens = CYCLE_PROMPTS.get("integration_max_tokens", 2000)
+        # The model is asked for ~core_max_chars characters; make sure the
+        # token limit can actually hold that (see core_validation.py).
+        integration_max_tokens = effective_integration_max_tokens(
+            CYCLE_PROMPTS.get("integration_max_tokens", 2000), core_max_chars)
 
         integration_response = _compaction_api_call(
             "integration", integration_prompt, integration_max_tokens, state)
 
         new_core = integration_response.content[0].text.strip()
+        accepted, reject_reason = validate_new_core(
+            new_core, current_core, integration_response.stop_reason)
         log_event(
             "compaction_integration",
             compaction=compaction_num,
@@ -664,10 +692,22 @@ def run_compaction(state):
             max_tokens=integration_max_tokens,
             core_chars_before=len(current_core),
             core_chars_after=len(new_core),
+            accepted=accepted,
+            reject_reason=reject_reason,
             **_usage_fields(integration_response),
         )
-        state["memoryCore"] = new_core
-        state["insights"] = remaining_insights
+        if accepted:
+            state["memoryCore"] = new_core
+            state["insights"] = remaining_insights
+        else:
+            # Keep the old core and leave the staged insights in the Insights
+            # layer so a later integration can retry them.
+            logging.error(
+                f"Compaction #{compaction_num}: integration rejected ({reject_reason}); "
+                f"keeping existing core ({len(current_core)} chars) and "
+                f"{len(staged_insights)} chars of staged insights."
+            )
+            state["insights"] = insights_text
 
     return True
 
