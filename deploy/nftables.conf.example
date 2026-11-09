@@ -56,6 +56,9 @@ table inet filter {
 		type filter hook input priority filter; policy drop;
 
 		iifname "lo" accept
+		# The API proxy (:8443) is for the local container only (it arrives
+		# via loopback). Don't expose it to the tailnet either.
+		tcp dport 8443 drop
 		# Admin access (including SSH) only over the tailnet.
 		iifname "tailscale0" accept
 		ct state established,related accept
